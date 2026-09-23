@@ -1,0 +1,2 @@
+import {requireSupabase} from '../../lib/supabase'; import type {ScheduleRow} from './excel';
+export async function importSchedule(sessionId:string,rows:ScheduleRow[]){const payload=rows.map(r=>({session_id:sessionId,sequence_no:r.sequence,national_id:r.nationalId,employee_no:r.employeeNo,full_name:r.name,gender:r.gender,schedule_slot:r.slot,group_code:r.groupCode,planned_items:r.items}));const{error}=await requireSupabase().from('participants').insert(payload);if(error)throw error;}
