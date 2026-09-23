@@ -82,3 +82,20 @@ npm run build
 ## 第二階段邊界
 
 `src/features/bridge/` 只定義可呼叫相同 check-in service 的事件介面。第一階段沒有 EXE 監控、UI Automation、log/database reader 或 scanner bridge；未來確認院方系統能力後才實作。
+
+## GitHub Pages 正式發布
+
+正式網址為 <https://ms0356372.github.io/Itri-sona-system/>。Vite、PWA manifest、Service Worker navigation fallback 與圖示都使用 `/Itri-sona-system/` 子路徑；請勿把 Pages 網址改成 Repository 根網域。
+
+### 第一次啟用
+
+1. 在 GitHub Repository 開啟 **Settings → Pages**。
+2. 在 **Build and deployment → Source** 選擇 **GitHub Actions**，不要選擇從 branch 直接發布。
+3. 開啟 **Settings → Secrets and variables → Actions → Variables**，建立：
+   - `VITE_SUPABASE_URL`：Supabase Project URL。
+   - `VITE_SUPABASE_PUBLISHABLE_KEY`：Supabase Publishable Key（舊專案可能顯示 anon key）。
+4. 不要建立、上傳或在前端使用 Supabase Secret Key / Service Role Key。`VITE_` 變數會被編譯進公開的瀏覽器 bundle，只能放可公開的 URL 與 Publishable Key；實際資料權限必須由 Supabase Auth 與 RLS 控制。
+5. 在 Supabase Authentication 的 URL Configuration 將正式 Site URL 設為上述 Pages 網址，並視登入流程加入相同網址作為允許的 Redirect URL。
+6. 合併或推送到 `main` 後，`Deploy GitHub Pages` workflow 會先執行 typecheck、lint、test、build，全部成功才上傳 `dist` 並部署。也可在 Actions 頁面用 `workflow_dispatch` 手動重新發布。
+
+若 Actions 顯示 environment protection 等待核准，請在 **Settings → Environments → github-pages** 調整部署規則。發布完成後請用無痕視窗檢查首頁、`manifest.webmanifest`、Service Worker、`icon.svg`，並在 Android Chrome 重新安裝或更新 PWA。Supabase variables 修改後必須重新執行部署，因為 Vite 會在 build 階段寫入公開前端 bundle。
