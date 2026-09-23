@@ -1,0 +1,1 @@
+import type {Participant} from '../../types'; export function cleanupSummary(rows:Participant[]){return{total:rows.length,checkedIn:rows.filter(x=>x.status!=='未報到').length,completed:rows.filter(x=>x.status==='已完成').length,incomplete:rows.filter(x=>x.status!=='已完成').length};}

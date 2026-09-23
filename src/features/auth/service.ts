@@ -1,0 +1,1 @@
+import {requireSupabase} from '../../lib/supabase'; export const signIn=(email:string,password:string)=>requireSupabase().auth.signInWithPassword({email,password}); export const signOut=()=>requireSupabase().auth.signOut();
