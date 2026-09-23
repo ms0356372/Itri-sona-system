@@ -1,0 +1,2 @@
+import {requireSupabase} from '../../lib/supabase';
+export function subscribeSession(sessionId:string,onChange:()=>void){const client=requireSupabase();const channel=client.channel(`session:${sessionId}`).on('postgres_changes',{event:'*',schema:'public',table:'participants',filter:`session_id=eq.${sessionId}`},onChange).subscribe();return()=>{void client.removeChannel(channel)};}

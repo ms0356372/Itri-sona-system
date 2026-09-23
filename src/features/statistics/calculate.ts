@@ -1,0 +1,2 @@
+import type {Examination} from '../../types';
+export function calculateStats(rows:Examination[]){const completed=rows.filter(x=>x.status==='completed');const items:Record<string,number>={};completed.forEach(x=>x.actualItems.forEach(i=>items[i]=(items[i]??0)+1));return{people:completed.length,items,totalItems:completed.reduce((n,x)=>n+x.itemCount,0),averageSeconds:completed.length?Math.round(completed.reduce((n,x)=>n+(x.durationSeconds??0),0)/completed.length):0};}
