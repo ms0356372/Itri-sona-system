@@ -52,7 +52,7 @@ npm run build
 
 ## 正式部署與 GitHub
 
-1. CI 會在 push/PR 執行 typecheck、lint、test、build。
+1. CI 會在 push/PR 由 npm registry 解析真實 lockfile，再以 `npm ci` 執行 typecheck、lint、test、build；產生的 lockfile 會保存為 Actions artifact 供審查。待從 CI artifact 取回並提交 `package-lock.json` 後，應重新啟用 setup-node `cache: npm`，並移除 lockfile bootstrap 步驟。
 2. 在 Vercel、Netlify、Cloudflare Pages 或 GitHub Pages 建立 Vite site：build command `npm ci && npm run build`，輸出 `dist`。
 3. 在部署平台設定兩個 `VITE_` 環境變數，並設定所有 SPA 路徑 fallback 到 `index.html`。
 4. 必須使用 HTTPS；確認 Supabase Auth Site URL / redirect URL 是正式網域。
