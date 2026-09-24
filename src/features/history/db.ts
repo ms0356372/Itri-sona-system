@@ -5,7 +5,7 @@ export class ClinicDatabase extends Dexie {
   history!:EntityTable<HistoricalRecord,'id'>;
   historyImports!:EntityTable<HistoryImport,'id'>;
   pendingHistory!:EntityTable<PendingHistoryRecord,'id'>;
-  drafts!:EntityTable<{participantId:string;roomId:string;startedAt:string;items:string[]},'participantId'>;
+  drafts!:EntityTable<{participantId:string;roomId:string;startedAt:string|null;items:string[]},'participantId'>;
   constructor(){
     super('ultrasound-clinic-local');
     this.version(1).stores({history:'++id,&fingerprint,nationalId,employeeNo,year,date',drafts:'&participantId,roomId'});
