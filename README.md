@@ -12,7 +12,7 @@
 - Dexie 本機歷年資料及未完成檢查草稿；結果不會上傳 Supabase。
 - 可設定的超音波項目、診間統計、設備清除回報與 Phase 2 Bridge 介面。
 
-> 首頁在未設定 Supabase 時提供「設定模式」與虛構介面資料，方便確認安裝；正式資料讀寫一定需要已登入且被加入場次的使用者。
+> 首頁在未設定 Supabase 時提供「設定模式」與虛構介面資料，方便確認安裝；正式資料讀寫一定需要已登入的工作人員。第一階段不再依工作站或診間細分資料庫權限。
 
 ## Windows 開發
 
@@ -36,11 +36,22 @@ npm run build
 ## 建立 Supabase
 
 1. 在 Supabase Dashboard 建立專案，保留 Project URL 與 **Publishable/anon key**；絕不可將 service-role/secret key放進前端或 Git。
-2. 用 CLI 登入及連結專案：`supabase login`、`supabase link --project-ref <ref>`。
-3. 套用資料表、函式、RLS 與 Realtime：`supabase db push`。Migration 位於 `supabase/migrations/`。
-4. 在 Authentication 建立管理者帳號。先由受信任的 SQL/Admin 程序建立場次與 `session_memberships`；每個帳號只可存取被加入的場次。
-5. 複製 `.env.example` 為 `.env.local`，填入 `VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY`。不要使用 service role。
-6. 診間設備使用個別 Auth 帳號或受管理裝置帳號，在 membership 指定 `clinic` 與 `room_id`；控制台使用 `console`，報到站使用 `registration`。
+2. Repository 已連接 Supabase GitHub Integration 時，設定 Production branch 為 `main`、Working directory 為 `.`，並開啟 **Deploy to production**。合併含有 `supabase/migrations/202609230001_initial.sql` 的 PR 後，由 Integration 套用尚未執行的 migration，不需要在 Windows 安裝 CLI。
+3. 在 Authentication 建立工作人員帳號，並關閉不符合院方帳號管理政策的公開註冊方式。第一階段以「已成功登入」作為工作人員授權邊界；所有工作人員可操作主要流程，不做工作站角色分級。
+4. 複製 `.env.example` 為 `.env.local`，填入 `VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY`。不要使用 service role。
+
+Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime publication。`anon` 沒有資料表權限，且所有含今日排程或身分證的 `participants` 查詢都只允許 `authenticated`；瀏覽器端仍只能使用 Publishable/anon key，由登入 JWT 配合 RLS 放行。
+
+### 第一次資料庫部署檢查
+
+合併到 `main` 後，在 Supabase Dashboard 的 GitHub Integration deployment/logs 確認 migration 成功，再到 **Database → Migrations** 確認 `202609230001_initial`，並到 **Table Editor → public** 確認資料表。不要在 SQL Editor 重貼 migration；否則 Integration 不會擁有一致的 migration history，且可能嘗試重建已存在物件。
+
+若合併後仍顯示 **Last migration: No migrations**，依序檢查 GitHub Integration：
+
+1. 連接的 repository 必須是 `ms0356372/Itri-sona-system`，且 Supabase GitHub App 對該 repository 仍有存取權。
+2. Production branch 必須是 `main`、Working directory 必須是 `.`、**Deploy to production** 必須開啟；migration 的相對路徑應為 `supabase/migrations/202609230001_initial.sql`。
+3. 查看該次 production deployment log。若沒有 deployment，重新儲存 Integration 設定後，對 `main` 產生一個包含 migration 變更的新 merge/push 事件；若有 deployment 但失敗，先依 log 修正 SQL，不要建立空白或重複 migration。
+4. 若 Dashboard 顯示 GitHub 授權或 repository 權限錯誤，從 Integration 重新授權 Supabase GitHub App，並只授予必要 repository；不需、也不可把 database password、personal access token、service-role key 或 secret key提交到 GitHub。
 
 資料庫 RPC 負責狀態轉換，前端不計算最大報到號。`participants(session_id, employee_no)` 與報到編號均有唯一約束；完成 RPC 在資料列鎖內冪等處理。
 
@@ -75,7 +86,7 @@ npm run build
 ## 安全注意事項
 
 - 不提交正式個資、Excel 或 `.env`；畫面預設遮罩身分證，不寫入 console/error log。
-- RLS 是資料邊界，按鈕隱藏不是授權。管理員才能管理項目、場次與異常修正。
+- RLS 是資料邊界，按鈕隱藏不是授權。只有 Supabase Auth 已登入的受管理工作人員可讀寫作業資料；應停用不需要的公開註冊並落實帳號停權流程。
 - 歷年醫療內容不經雲端同步；裝置需螢幕鎖、磁碟加密、遠端管理及人員交接程序。
 - 正式上線前必須完成院方威脅模型、DPIA/法遵、備份與復原演練、稽核及 Supabase 專案安全設定審查。
 
