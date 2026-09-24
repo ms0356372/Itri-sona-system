@@ -8,6 +8,6 @@ export interface HistoricalRecord {id?:number;fingerprint:string;nationalId:stri
 export interface HistoryImportSummary {inserted:number;skipped:number;pending:number;failed:number}
 export interface HistoryImport extends HistoryImportSummary{id?:number;fileName:string;importedAt:string}
 export interface PendingHistoryRecord{id?:number;identity:string;date:string;type:UltrasoundItemName;existingFingerprint:string;incoming:HistoricalRecord;sourceFile:string;createdAt:string}
-export interface Examination {id:string;participantId:string;roomId:string;startedAt:string;completedAt:string|null;durationSeconds:number|null;actualItems:string[];itemCount:number;status:'in_progress'|'completed'}
+export interface Examination {id:string;participantId:string;roomId:string;startedAt:string;completedAt:string|null;durationSeconds:number|null;selectedItems:UltrasoundItemName[];actualItems:UltrasoundItemName[];itemCount:number;status:'in_progress'|'completed'}
 
 export interface ImportResult {inserted:number;skipped:number}
