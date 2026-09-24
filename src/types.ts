@@ -6,8 +6,8 @@ export const ultrasoundItemNames=['腹部超音波','甲狀腺超音波','婦科
 export type UltrasoundItemName=typeof ultrasoundItemNames[number];
 export interface HistoricalRecord {id?:number;fingerprint:string;nationalId:string;employeeNo:string;name:string;year:number;date:string;type:UltrasoundItemName;values:Record<string,string>;sourceFile:string}
 export interface HistoryImportSummary {inserted:number;skipped:number;pending:number;failed:number}
-export interface HistoryImport extends HistoryImportSummary{id?:number;fileName:string;importedAt:string}
-export interface PendingHistoryRecord{id?:number;identity:string;date:string;type:UltrasoundItemName;existingFingerprint:string;incoming:HistoricalRecord;sourceFile:string;createdAt:string}
+export interface HistoryImport extends HistoryImportSummary{id?:number;fileName:string;importedAt:string;status?:'completed'|'partial';sourceRows?:number}
+export interface PendingHistoryRecord{id?:number;identity:string;date:string;type:UltrasoundItemName;existingFingerprint:string;incomingFingerprint:string;incoming:HistoricalRecord;sourceFile:string;createdAt:string}
 export interface Examination {id:string;participantId:string;roomId:string;startedAt:string;completedAt:string|null;durationSeconds:number|null;selectedItems:UltrasoundItemName[];actualItems:UltrasoundItemName[];itemCount:number;status:'in_progress'|'completed'}
 
 export interface ImportResult {inserted:number;skipped:number}
