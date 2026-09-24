@@ -5,10 +5,10 @@
 ## 已完成的第一階段骨架
 
 - 觸控優先工作站介面、PWA manifest 與離線應用殼。
-- 今日 Excel 欄名正規化、驗證、預覽；工號一律用字串，身分證大寫。
+- 報到站名單 Excel 欄名正規化、驗證、比對與預覽；工號一律用字串並保留前導零。
 - PostgreSQL 交易式 A–G 報到流水號、冪等報到與完成、狀態轉換 RPC。
 - Supabase Auth、場次成員角色、RLS、Realtime publication。
-- 診間三路查詢所共用的身分比對規則、工號異動／衝突警告。
+- 今日雲端排程以場次 UUID、participant UUID 與工號識別，不保存身分證。
 - Dexie 本機歷年資料及未完成檢查草稿；結果不會上傳 Supabase。
 - 可設定的超音波項目、診間統計、設備清除回報與 Phase 2 Bridge 介面。
 
@@ -40,7 +40,7 @@ npm run build
 3. 在 Authentication 建立工作人員帳號，並關閉不符合院方帳號管理政策的公開註冊方式。第一階段以「已成功登入」作為工作人員授權邊界；所有工作人員可操作主要流程，不做工作站角色分級。
 4. 複製 `.env.example` 為 `.env.local`，填入 `VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY`。不要使用 service role。
 
-Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime publication。`anon` 沒有資料表權限，且所有含今日排程或身分證的 `participants` 查詢都只允許 `authenticated`；瀏覽器端仍只能使用 Publishable/anon key，由登入 JWT 配合 RLS 放行。
+Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime publication。`anon` 沒有資料表權限，且所有今日排程查詢都只允許 `authenticated`；瀏覽器端仍只能使用 Publishable/anon key，由登入 JWT 配合 RLS 放行。`participants` 不含身分證欄位，完整公司大名單只存在報到站的 IndexedDB。
 
 ### 第一次資料庫部署檢查
 
@@ -55,11 +55,63 @@ Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime p
 
 資料庫 RPC 負責狀態轉換，前端不計算最大報到號。`participants(session_id, employee_no)` 與報到編號均有唯一約束；完成 RPC 在資料列鎖內冪等處理。
 
+### 移除既有 `participants.national_id`
+
+`202609240001_remove_participant_national_id.sql` 是已部署初始 schema 的增量 migration；初始 migration 不會被回寫。它只移除舊欄位與其索引，不會停用或放寬 RLS，也不會修改報到流水號、場次 UUID、participant UUID 或狀態 RPC。
+
+正式環境套用前，請由資料庫管理者在 Supabase SQL Editor 先執行唯讀盤點：
+
+```sql
+select count(*) as participant_count,
+       count(*) filter (
+         where national_id is not null and length(trim(national_id)) > 0
+       ) as populated_national_id_count
+from public.participants;
+
+select routine_name
+from information_schema.routines
+where routine_schema = 'public'
+  and routine_definition ilike '%national_id%';
+```
+
+若 `populated_national_id_count` 大於 0，migration 會故意中止，不會把資料改成假值、空字串、`note`、JSON 或其他雲端欄位。請先依院方核准程序確認刪除影響，並在允許的離線位置完成必要的留存；確認可以永久移除後，由資料庫 owner 明確設定一次性核准旗標：
+
+```sql
+alter database postgres
+  set app.confirm_participant_national_id_removal = 'confirmed';
+```
+
+重新連線並套用 migration，確認 `public.participants` 已不存在 `national_id` 後，立即移除旗標：
+
+```sql
+alter database postgres
+  reset app.confirm_participant_national_id_removal;
+```
+
+驗證 schema、RLS 與 RPC：
+
+```sql
+select column_name
+from information_schema.columns
+where table_schema = 'public' and table_name = 'participants';
+
+select relrowsecurity
+from pg_class
+where oid = 'public.participants'::regclass;
+
+select routine_name
+from information_schema.routines
+where routine_schema = 'public'
+  and routine_name in ('check_in_participant', 'set_waiting_status');
+```
+
+預期欄位清單中沒有 `national_id`、`relrowsecurity` 仍為 `true`，且兩個報到 RPC 仍存在。若正式環境沒有既有身分證資料，migration 可直接安全套用，不需設定核准旗標。
+
 ## Excel
 
-今日排程必要欄：`序號`、`人員工號/工號`、`人員姓名/姓名`、`性別`、`排程時段`、`項目`、`身分證/身份證/ID`。Excel 若把 `00125` 儲存為數值 `125`，檔案本身已失去前導零，系統無法推測；來源欄必須設定成文字。
+廠商大名單至少包含工號、姓名、身分證、性別、`活動項目(原始)` 與`項目`；它只保存在報到站 IndexedDB，供當日比對與完整 Excel 匯出使用。每日排程至少包含工號、姓名、排程日期、排程時段與活動項目，不需要也不應包含身分證。Excel 若把 `00125` 儲存為數值 `125`，檔案本身已失去前導零，系統無法推測；來源欄必須設定成文字。
 
-歷年資料匯入支援手動對應身分證、當時工號、姓名、年份、日期、種類、結果；去重指紋不會修改結果原文。資料僅在匯入的瀏覽器 profile / IndexedDB 中。虛構資料：`npm run fixtures`（或直接執行 `node scripts/generate-fixtures.mjs`）。
+歷年資料匯入支援手動對應當時工號、姓名、年份、日期、種類與結果；不匯入或保存身分證，去重指紋也不含身分證且不會修改結果原文。資料僅在匯入的瀏覽器 profile / IndexedDB 中；既有診間 IndexedDB 升級時會移除舊版歷年紀錄中的身分證欄位。虛構資料：`npm run fixtures`（或直接執行 `node scripts/generate-fixtures.mjs`）。
 
 ## 正式部署與 GitHub
 
@@ -85,7 +137,7 @@ Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime p
 
 ## 安全注意事項
 
-- 不提交正式個資、Excel 或 `.env`；畫面預設遮罩身分證，不寫入 console/error log。
+- 不提交正式個資、Excel 或 `.env`；身分證只保存在報到站本機 IndexedDB 與使用者主動匯出的完整 Excel，不寫入 Supabase、`note`、JSON、其他文字欄位、console 或 error log。
 - RLS 是資料邊界，按鈕隱藏不是授權。只有 Supabase Auth 已登入的受管理工作人員可讀寫作業資料；應停用不需要的公開註冊並落實帳號停權流程。
 - 歷年醫療內容不經雲端同步；裝置需螢幕鎖、磁碟加密、遠端管理及人員交接程序。
 - 正式上線前必須完成院方威脅模型、DPIA/法遵、備份與復原演練、稽核及 Supabase 專案安全設定審查。
