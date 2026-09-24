@@ -1,5 +1,5 @@
 import {describe,expect,it,vi} from 'vitest';
-import {findScheduledEmployee,isCompleteNationalId,matchCloudParticipant} from '../features/checkin/lookup';
+import {findScheduledEmployee,isAlreadyCheckedIn,isCompleteNationalId,matchCloudParticipant,repeatCheckinMessage} from '../features/checkin/lookup';
 import type {PreparedPerson} from '../features/roster/types';
 import type {Participant} from '../types';
 
@@ -14,4 +14,8 @@ describe('身分證手動報到查詢',()=>{
   it('只以完整工號配對雲端資料，前導 0 不會遺失',()=>{const cloud=[participant(),participant({id:'cloud-2',employeeNo:'125'})];expect(matchCloudParticipant(cloud,'00125')?.id).toBe('cloud-1');});
   it('查詢介面不需要把身分證交給雲端配對函式',()=>{const spy=vi.fn(matchCloudParticipant);spy([participant()],'00125');expect(spy).toHaveBeenCalledWith(expect.any(Array),'00125');expect(spy).not.toHaveBeenCalledWith(expect.any(Array),'A123456789');});
   it('已報到者保留資料庫既有編號',()=>expect(matchCloudParticipant([participant({status:'等候中',checkinNo:'A7'})],'00125')).toMatchObject({status:'等候中',checkinNo:'A7'}));
+  it.each(['等候中','已叫號','上廁所','心電圖','先做其他','檢查中'] as const)('%s 再次掃描會顯示原編號及實際狀態',status=>{const found=matchCloudParticipant([participant({status,checkinNo:'A1',checkedInAt:'2026-09-24T00:01:00Z'})],'00125')!;expect(isAlreadyCheckedIn(found)).toBe(true);expect(found).toMatchObject({status,checkinNo:'A1'});expect(repeatCheckinMessage(found)).toContain('報到編號：A1');});
+  it('已完成者仍保留完整資料並顯示完成提示',()=>expect(repeatCheckinMessage(participant({status:'已完成',checkinNo:'A1',checkedInAt:'2026-09-24T00:01:00Z'}))).toBe('此受檢者已完成檢查。'));
+  it('只有報到時間的舊資料也不允許重複報到',()=>expect(isAlreadyCheckedIn(participant({checkedInAt:'2026-09-24T00:01:00Z'}))).toBe(true));
+  it('同一身分證連續查詢三次都取得同一工號',()=>{const rows=[prepared()];expect(Array.from({length:3},()=>findScheduledEmployee(rows,'A123456789'))).toEqual(Array(3).fill({kind:'found',employeeNo:'00125'}));});
 });
