@@ -30,3 +30,5 @@ export async function getPreparedSchedule(sessionId:string):Promise<PreparedPers
   const rows=await rosterDb.preparedPeople.where('sessionId').equals(sessionId).sortBy('sequence');
   return rows.map(row=>{const person={...row};delete (person as Partial<StoredPreparedPerson>).sessionId;return person;});
 }
+/** Removes only one day's locally prepared schedule. Company master data and its lock are untouched. */
+export const clearPreparedSchedule=(sessionId:string)=>rosterDb.preparedPeople.where('sessionId').equals(sessionId).delete();
