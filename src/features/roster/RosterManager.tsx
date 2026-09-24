@@ -1,7 +1,7 @@
 import {useEffect,useMemo,useState} from 'react';
 import {AlertTriangle,CheckCircle2,Download,HelpCircle,Plus,Search,ShieldCheck,Upload,X} from 'lucide-react';
 import type {Participant,Session} from '../../types';
-import {addMasterPerson,clearCompanyMaster,getCompanyMaster,replaceCompanyMaster} from './db';
+import {addMasterPerson,clearCompanyMaster,getCompanyMaster,getPreparedSchedule,replaceCompanyMaster,replacePreparedSchedule} from './db';
 import {exportPreparedRoster,readDailyFile,readMasterFile} from './excel';
 import {issueLabels,makePreparedFromMaster,matchRoster} from './match';
 import type {MasterPerson,PreparedPerson} from './types';
@@ -13,8 +13,8 @@ type Props={current:Session;participants:Participant[];onUploaded:(message:strin
 
 export function RosterManager({current,participants,onUploaded,setNotice}:Props){
   const[master,setMaster]=useState<MasterPerson[]>([]);const[prepared,setPrepared]=useState<PreparedPerson[]>([]);const[pending,setPending]=useState<PreparedPerson[]>([]);const[help,setHelp]=useState(false);const[busy,setBusy]=useState(false);const[error,setError]=useState('');const[addMode,setAddMode]=useState<'master'|'new'|null>(null);const started=participants.some(p=>p.checkedInAt);
-  const loadMaster=async()=>setMaster(await getCompanyMaster(current.companyName));useEffect(()=>{setPrepared([]);setPending([]);getCompanyMaster(current.companyName).then(setMaster).catch(e=>setError(String(e)));},[current.companyName]);
-  const finalize=(next:PreparedPerson[])=>setPrepared(next.map((row,index)=>({...row,sequence:index+1})));
+  const loadMaster=async()=>setMaster(await getCompanyMaster(current.companyName));useEffect(()=>{setPending([]);Promise.all([getCompanyMaster(current.companyName),getPreparedSchedule(current.id)]).then(([savedMaster,savedPrepared])=>{setMaster(savedMaster);setPrepared(savedPrepared);}).catch(e=>setError(String(e)));},[current.companyName,current.id]);
+  const finalize=(next:PreparedPerson[])=>{const numbered=next.map((row,index)=>({...row,sequence:index+1}));setPrepared(numbered);replacePreparedSchedule(current.id,numbered).catch(e=>setError(String(e)));};
   const importMaster=async(file:File)=>{setBusy(true);setError('');try{const rows=await readMasterFile(file,current.companyName);await replaceCompanyMaster(current.companyName,rows);setMaster(rows);setNotice(`已匯入並保存在本機的大名單，共 ${rows.length} 筆。`);}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
   const importDaily=async(file:File)=>{setBusy(true);setError('');try{const daily=await readDailyFile(file);const dates=new Set(daily.map(r=>r.scheduleDate));if(dates.size!==1)throw new Error('每日排程必須只包含單一健檢日期。');if(!dates.has(current.sessionDate))throw new Error(`檔案日期（${[...dates][0]||'空白'}）與目前場次（${current.sessionDate}）不一致。`);const result=matchRoster(master,daily);finalize(result.ready);setPending(result.pending);setNotice(`每日排程已整理：可用 ${result.ready.length} 筆，待確認 ${result.pending.length} 筆。`);}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
   const resolve=(row:PreparedPerson)=>{const valid=row.employeeNo&&row.name&&row.scheduleDate&&row.slot&&row.item;if(!valid){setError('請先補齊工號、姓名、日期、時段與項目。');return;}finalize([...prepared,{...row,issues:[],confirmed:true}]);setPending(value=>value.filter(item=>item.localId!==row.localId));setError('');};
