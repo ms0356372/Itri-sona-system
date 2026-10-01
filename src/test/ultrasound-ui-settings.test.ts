@@ -1,5 +1,6 @@
 import {beforeEach,describe,expect,it} from 'vitest';
 import {clampUltrasoundUiValue,defaultUltrasoundUiSettings,exportUltrasoundUiSettings,loadUltrasoundUiSettings,saveUltrasoundUiSettings,ULTRASOUND_UI_STORAGE_KEY,ultrasoundUiPresets,validateUltrasoundUiSettings} from '../features/room/ultrasoundUiSettings';
+import {availableRoomHeight} from '../features/room/viewportHeight';
 
 describe('ultrasound room UI settings',()=>{
   beforeEach(()=>localStorage.clear());
@@ -38,5 +39,11 @@ describe('ultrasound room UI settings',()=>{
     expect(exported).toContain('Ultrasound Room UI Settings');
     expect(exported).toContain(`sidebarWidth=${defaultUltrasoundUiSettings.sidebarWidth}`);
     expect(exported).toContain('"historyTextSize"');
+  });
+
+  it('calculates room height from the visual viewport and actual workspace position',()=>{
+    expect(availableRoomHeight(720,165,8)).toBe(547);
+    expect(availableRoomHeight(720,165,8,24)).toBe(571);
+    expect(availableRoomHeight(100,150,8)).toBe(0);
   });
 });
