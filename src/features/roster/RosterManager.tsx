@@ -2,12 +2,13 @@ import {useEffect,useMemo,useState} from 'react';
 import {AlertTriangle,CheckCircle2,Download,HelpCircle,Lock,LockOpen,Plus,Search,ShieldCheck,Upload,X} from 'lucide-react';
 import type {Participant,Session} from '../../types';
 import {addMasterPerson,clearCompanyMaster,getCompanyMaster,getCompanyMasterLockState,getPreparedSchedule,replaceCompanyMaster,replacePreparedSchedule,setCompanyMasterLocked} from './db';
+import {normalizeCompanyName} from '../../lib/company';
 import {exportPreparedRoster,readDailyFile,readMasterFile} from './excel';
 import {issueLabels,makePreparedFromMaster,matchRoster} from './match';
 import type {MasterPerson,PreparedPerson} from './types';
 import {uploadPreparedSchedule} from '../schedule/service';
 
-const blankPerson=(companyName:string):MasterPerson=>({companyName,employeeNo:'',name:'',nationalId:'',gender:'',originalActivity:'',item:'',extension:'',updatedAt:new Date().toISOString()});
+const blankPerson=(companyName:string):MasterPerson=>({companyName,companyKey:normalizeCompanyName(companyName),employeeNo:'',name:'',nationalId:'',gender:'',originalActivity:'',item:'',extension:'',updatedAt:new Date().toISOString()});
 const today=()=>new Date().toISOString().slice(0,10);
 type Props={current:Session;participants:Participant[];onUploaded:(message:string)=>Promise<void>;setNotice:(message:string)=>void};
 
