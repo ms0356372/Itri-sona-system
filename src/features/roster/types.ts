@@ -1,6 +1,7 @@
 export interface MasterPerson {
   id?: number;
   companyName: string;
+  companyKey: string;
   employeeNo: string;
   name: string;
   nationalId: string;

@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import {normalizeNationalId} from '../../lib/privacy';
+import {normalizeCompanyName} from '../../lib/company';
 import {normalizeSlot} from '../schedule/rules';
 import type {DailySchedulePerson,MasterPerson,PreparedPerson} from './types';
 
@@ -14,7 +15,7 @@ function sheetRows(bytes:ArrayBuffer){const workbook=XLSX.read(bytes,{type:'arra
 
 export function parseMasterRows(raw:Record<string,unknown>[],companyName:string){
   const map=headerMap(Object.keys(raw[0]??{}),masterAliases);const missing=(['employeeNo','name','nationalId','gender','originalActivity','item'] as const).filter(k=>!map[k]);if(missing.length)throw new Error(`大名單缺少必要欄位：${missing.map(k=>masterAliases[k][0]).join('、')}`);
-  const now=new Date().toISOString();return raw.filter(row=>Object.values(row).some(Boolean)).map((row,index):MasterPerson=>{const person={companyName,employeeNo:text(row,map.employeeNo),name:text(row,map.name),nationalId:normalizeNationalId(text(row,map.nationalId)),gender:text(row,map.gender),originalActivity:text(row,map.originalActivity),item:text(row,map.item),extension:text(row,map.extension),updatedAt:now};if(!person.employeeNo||!person.name)throw new Error(`大名單第 ${index+2} 列缺少工號或姓名`);return person;});
+  const now=new Date().toISOString();return raw.filter(row=>Object.values(row).some(Boolean)).map((row,index):MasterPerson=>{const person={companyName,companyKey:normalizeCompanyName(companyName),employeeNo:text(row,map.employeeNo),name:text(row,map.name),nationalId:normalizeNationalId(text(row,map.nationalId)),gender:text(row,map.gender),originalActivity:text(row,map.originalActivity),item:text(row,map.item),extension:text(row,map.extension),updatedAt:now};if(!person.employeeNo||!person.name)throw new Error(`大名單第 ${index+2} 列缺少工號或姓名`);return person;});
 }
 export function parseDailyRows(raw:Record<string,unknown>[]){
   const map=headerMap(Object.keys(raw[0]??{}),dailyAliases);const missing=(['employeeNo','name','scheduleDate','slot','activity'] as const).filter(k=>!map[k]);if(missing.length)throw new Error(`每日排程缺少必要欄位：${missing.map(k=>dailyAliases[k][0]).join('、')}`);
