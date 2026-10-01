@@ -1,5 +1,6 @@
 import {requireSupabase} from '../../lib/supabase';
 import type {Examination,UltrasoundItemName} from '../../types';
+import {ultrasoundItemNames} from '../../types';
 import {db} from '../history/db';
 
 type ExaminationRow={id:string;participant_id:string;round_no:number;room_id:string|null;started_at:string|null;completed_at:string|null;duration_seconds:number|null;selected_items?:string[];actual_items:string[];item_count:number;status:Examination['status']};
@@ -8,7 +9,10 @@ const mapExamination=(row:ExaminationRow):Examination=>({id:row.id,participantId
 export async function getExamination(participantId:string){const{data,error}=await requireSupabase().from('examinations').select('*').eq('participant_id',participantId).in('status',['waiting','in_progress']).order('round_no',{ascending:false}).limit(1).maybeSingle();if(error)throw error;return data?mapExamination(data as ExaminationRow):null;}
 export async function getRoomExamination(sessionId:string,roomId:string){const{data,error}=await requireSupabase().from('examinations').select('*,participants!inner(session_id)').eq('participants.session_id',sessionId).eq('room_id',roomId).eq('status','in_progress').maybeSingle();if(error)throw error;return data?mapExamination(data as unknown as ExaminationRow):null;}
 export async function listExaminations(participantIds:string[]){if(!participantIds.length)return[];const{data,error}=await requireSupabase().from('examinations').select('*').in('participant_id',participantIds).order('round_no');if(error)throw error;return(data as ExaminationRow[]).map(mapExamination);}
-export async function enqueueAdditionalExamination(participantId:string,items:UltrasoundItemName[]){const{data,error}=await requireSupabase().rpc('enqueue_additional_examination',{p_participant_id:participantId,p_selected_items:items});if(error)throw error;return mapExamination(data as ExaminationRow);}
+export function isUltrasoundItemName(item:string):item is UltrasoundItemName{return ultrasoundItemNames.some(name=>name===item);}
+export function getPlannedUltrasoundItems(items:readonly string[]):UltrasoundItemName[]{return items.filter(isUltrasoundItemName);}
+export function areValidUltrasoundItems(items:readonly string[]):items is readonly UltrasoundItemName[]{return items.every(isUltrasoundItemName);}
+export async function enqueueAdditionalExamination(participantId:string,items:readonly UltrasoundItemName[]){if(!areValidUltrasoundItems(items))throw new Error('追加檢查項目資料異常，請重新選擇。');const{data,error}=await requireSupabase().rpc('enqueue_additional_examination',{p_participant_id:participantId,p_selected_items:[...items]});if(error)throw error;return mapExamination(data as ExaminationRow);}
 export async function cloudNow(){const before=Date.now();const{data,error}=await requireSupabase().rpc('examination_clock');const after=Date.now();if(error)throw error;const server=Date.parse(data as string);return{iso:new Date(server).toISOString(),offsetMs:server-Math.round((before+after)/2)};}
 export async function saveExaminationDraft(participantId:string,roomId:string,items:UltrasoundItemName[],startedAt:string|null=null){await db.drafts.put({participantId,roomId,items,startedAt});}
 export async function startExamination(participantId:string,roomId:string,items:UltrasoundItemName[]){await saveExaminationDraft(participantId,roomId,items);const{data,error}=await requireSupabase().rpc('start_examination',{p_participant_id:participantId,p_room_id:roomId,p_selected_items:items});if(error)throw error;const examination=mapExamination(data as ExaminationRow);await saveExaminationDraft(participantId,examination.roomId!,examination.selectedItems,examination.startedAt);return examination;}
@@ -16,3 +20,4 @@ export async function completeExamination(examinationId:string,participantId:str
 export async function restoreDraft(participantId:string){return db.drafts.get(participantId);}
 export function completedItems(examinations:Examination[]){return[...new Set(examinations.filter(item=>item.status==='completed').flatMap(item=>item.actualItems))];}
 export function remainingPlannedItems(planned:UltrasoundItemName[],examinations:Examination[]){const completed=new Set(completedItems(examinations));return planned.filter(item=>!completed.has(item));}
+export function remainingPlannedItemsForParticipant(plannedItems:readonly string[],examinations:Examination[]){return remainingPlannedItems(getPlannedUltrasoundItems(plannedItems),examinations);}
