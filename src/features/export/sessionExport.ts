@@ -26,10 +26,10 @@ export function buildCheckinWorkbook(participants:Participant[]){
   XLSX.utils.book_append_sheet(workbook,checkedSheet,'今日已報到');XLSX.utils.book_append_sheet(workbook,missingSheet,'今日應報到未報到');return workbook;
 }
 
-const detailHeaders=['序號','報到編號','工號','姓名','性別','排程時段','診間','檢查狀態','開始時間','完成時間','總檢查時間','總檢查秒數','實際完成項目','完成件數',...ultrasoundItemNames.map(item=>`${item}估算時間`)];
+const detailHeaders=['序號','報到編號','工號','姓名','性別','排程時段','檢查輪次','診間','檢查狀態','開始時間','完成時間','總檢查時間','總檢查秒數','實際完成項目','完成件數',...ultrasoundItemNames.map(item=>`${item}估算時間`)];
 function detailRow(examination:Examination,participant:Participant|undefined):(string|number)[]{
   const completed=examination.status==='completed'&&examination.completedAt!==null&&examination.durationSeconds!==null;const estimates=completed?calculateEstimatedItemDurations(examination):{};const items=completed?validActualItems(examination):[];
-  return[participant?.sequence??'',text(participant?.checkinNo),text(participant?.employeeNo),participant?.name??'',participant?.gender??'',participant?.slot??'',examination.roomId,examination.status,formatTaiwanTime(examination.startedAt),completed?formatTaiwanTime(examination.completedAt):'',completed?formatDuration(examination.durationSeconds):'',completed?examination.durationSeconds!:'',items.join('、'),items.length,...ultrasoundItemNames.map(item=>estimates[item]===undefined?'':formatDuration(estimates[item]))];
+  return[participant?.sequence??'',text(participant?.checkinNo),text(participant?.employeeNo),participant?.name??'',participant?.gender??'',participant?.slot??'',`第${examination.roundNo}輪`,examination.roomId??'',examination.status,formatTaiwanTime(examination.startedAt),completed?formatTaiwanTime(examination.completedAt):'',completed?formatDuration(examination.durationSeconds):'',completed?examination.durationSeconds!:'',items.join('、'),items.length,...ultrasoundItemNames.map(item=>estimates[item]===undefined?'':formatDuration(estimates[item]))];
 }
 
 export function buildUltrasoundWorkbook(session:Session,participants:Participant[],examinations:Examination[]){
@@ -38,7 +38,7 @@ export function buildUltrasoundWorkbook(session:Session,participants:Participant
   XLSX.utils.book_append_sheet(workbook,sheetFromRows(overview,[28,24,22,24],false),'總覽');
   const roomRows:(string|number)[][]=[['【診間總體統計】','','','','','',''],['診間','完成人數','完成件數','總檢查時間','平均每人檢查時間','最短檢查時間','最長檢查時間'],...summary.rooms.map(room=>[room.roomId,room.statistics.completedPeople,room.statistics.completedItems,formatDuration(room.statistics.totalSeconds),formatDuration(room.statistics.averageSeconds),formatDuration(room.statistics.minimumSeconds),formatDuration(room.statistics.maximumSeconds)]),[],['【診間 × 超音波項目】','','','',''],['診間','超音波項目','完成人次','估算總時間','平均估算時間'],...summary.rooms.flatMap(room=>ultrasoundItemNames.map(item=>[room.roomId,item,room.statistics.items[item].count,formatDuration(room.statistics.items[item].estimatedSeconds),formatDuration(room.statistics.items[item].averageEstimatedSeconds)]))];
   XLSX.utils.book_append_sheet(workbook,sheetFromRows(roomRows,[16,20,14,20,22,18,18],false),'診間統計');
-  const people=new Map(participants.map(person=>[person.id,person]));const details=[...examinations].sort((a,b)=>a.startedAt.localeCompare(b.startedAt));const detailSheet=sheetFromRows([detailHeaders,...details.map(item=>detailRow(item,people.get(item.participantId)))],[8,12,16,14,8,14,14,14,12,12,16,16,36,12,20,22,20,22,20]);forceTextColumns(detailSheet,[1,2]);XLSX.utils.book_append_sheet(workbook,detailSheet,'檢查者明細');
+  const people=new Map(participants.map(person=>[person.id,person]));const details=[...examinations].sort((a,b)=>(a.startedAt??'').localeCompare(b.startedAt??''));const detailSheet=sheetFromRows([detailHeaders,...details.map(item=>detailRow(item,people.get(item.participantId)))],[8,12,16,14,8,14,14,14,12,12,16,16,36,12,20,22,20,22,20]);forceTextColumns(detailSheet,[1,2]);XLSX.utils.book_append_sheet(workbook,detailSheet,'檢查者明細');
   for(const room of summary.rooms){const roomSheet=sheetFromRows([detailHeaders,...room.examinations.map(item=>detailRow(item,people.get(item.participantId)))],[8,12,16,14,8,14,14,14,12,12,16,16,36,12,20,22,20,22,20]);forceTextColumns(roomSheet,[1,2]);const name=`${room.roomId.replace(/\s+/g,'')}明細`.slice(0,31);XLSX.utils.book_append_sheet(workbook,roomSheet,name);}
   return workbook;
 }
