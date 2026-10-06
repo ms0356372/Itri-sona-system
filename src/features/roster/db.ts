@@ -1,5 +1,7 @@
 import Dexie,{type EntityTable} from 'dexie';
 import {normalizeCompanyName} from '../../lib/company';
+import {normalizeNationalId} from '../../lib/privacy';
+import {assertCompleteImportedPeople,assertUniqueImportedEmployees,previewCompanyMasterUpdate,type MasterUpdateSummary} from './masterImport';
 import type {MasterPerson,PreparedPerson} from './types';
 
 export type StoredPreparedPerson=PreparedPerson&{sessionId:string};
@@ -39,7 +41,38 @@ export const rosterDb=new RosterDatabase();
 
 export async function replaceCompanyMaster(companyName:string,people:MasterPerson[]){
   const companyKey=normalizeCompanyName(companyName);
-  await rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{await rosterDb.masterPeople.where('companyKey').equals(companyKey).delete();await rosterDb.masterPeople.bulkAdd(people.map(person=>({...person,companyKey})));await rosterDb.companySettings.put({companyName,companyKey,masterLocked:true,updatedAt:new Date().toISOString()});});
+  assertUniqueImportedEmployees(people);
+  assertCompleteImportedPeople(people);
+  await rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{await rosterDb.masterPeople.where('companyKey').equals(companyKey).delete();await rosterDb.masterPeople.bulkAdd(people.map(person=>({...person,companyName,companyKey})));await rosterDb.companySettings.put({companyName,companyKey,masterLocked:true,updatedAt:new Date().toISOString()});});
+}
+export async function mergeCompanyMaster(companyName:string,people:MasterPerson[]):Promise<MasterUpdateSummary>{
+  assertUniqueImportedEmployees(people);
+  assertCompleteImportedPeople(people);
+  const companyKey=normalizeCompanyName(companyName);
+  return rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{
+    const existing=await rosterDb.masterPeople.where('companyKey').equals(companyKey).toArray();
+    const byEmployee=new Map<string,MasterPerson>();
+    for(const person of existing){
+      if(byEmployee.has(person.employeeNo))throw new Error(`目前公司大名單有重複工號：${person.employeeNo}，請至名單管理確認後重新匯入。`);
+      byEmployee.set(person.employeeNo,person);
+    }
+    const summary=previewCompanyMasterUpdate(existing,people);
+    const now=new Date().toISOString();
+    for(const person of people){
+      const prior=byEmployee.get(person.employeeNo);
+      const next:MasterPerson={...person,companyName,companyKey,nationalId:normalizeNationalId(person.nationalId),updatedAt:now};
+      if(prior){
+        next.id=prior.id;
+        next.extension=person.extension.trim()?person.extension:prior.extension;
+        await rosterDb.masterPeople.put(next);
+      }else{
+        delete next.id;
+        await rosterDb.masterPeople.add(next);
+      }
+    }
+    await rosterDb.companySettings.put({companyName,companyKey,masterLocked:true,updatedAt:now});
+    return summary;
+  });
 }
 export const getCompanyMaster=(companyName:string)=>rosterDb.masterPeople.where('companyKey').equals(normalizeCompanyName(companyName)).toArray();
 export const getCompanyMasterLockState=async(companyName:string)=>(await rosterDb.companySettings.get(normalizeCompanyName(companyName)))?.masterLocked;
@@ -54,6 +87,44 @@ export async function replacePreparedSchedule(sessionId:string,people:PreparedPe
 export async function getPreparedSchedule(sessionId:string):Promise<PreparedPerson[]>{
   const rows=await rosterDb.preparedPeople.where('sessionId').equals(sessionId).sortBy('sequence');
   return rows.map(row=>{const person={...row};delete (person as Partial<StoredPreparedPerson>).sessionId;return person;});
+}
+const sameIdentity=(left:Pick<PreparedPerson,'employeeNo'|'nationalId'|'name'>,right:Pick<PreparedPerson,'employeeNo'|'nationalId'|'name'>)=>left.employeeNo===right.employeeNo&&normalizeNationalId(left.nationalId)===normalizeNationalId(right.nationalId)&&left.name.trim()===right.name.trim();
+const withoutSessionId=(row:StoredPreparedPerson):PreparedPerson=>{const person={...row};delete (person as Partial<StoredPreparedPerson>).sessionId;return person;};
+
+/** Appends one person atomically and reuses their original local row on retry. */
+export async function addPreparedPerson(sessionId:string,person:PreparedPerson,master?:MasterPerson):Promise<PreparedPerson>{
+  if(!sessionId||!person.employeeNo.trim()||!person.name.trim()||!normalizeNationalId(person.nationalId))throw new Error('新增受檢者缺少場次、工號、姓名或身分證資料。');
+  return rosterDb.transaction('rw',[rosterDb.preparedPeople,rosterDb.masterPeople],async()=>{
+    const existing=await rosterDb.preparedPeople.where('sessionId').equals(sessionId).toArray();
+    const employeeMatches=existing.filter(row=>row.employeeNo===person.employeeNo);
+    const nationalIdMatches=existing.filter(row=>normalizeNationalId(row.nationalId)===normalizeNationalId(person.nationalId));
+    if(employeeMatches.length>1||nationalIdMatches.length>1)throw new Error('同一身分證或工號對應多筆今日資料，請工作人員確認排程。');
+    if(employeeMatches.some(row=>!sameIdentity(row,person)))throw new Error('此工號已存在於今日排程，請確認人員資料。');
+    if(nationalIdMatches.some(row=>row.employeeNo!==person.employeeNo))throw new Error('此身分證已存在於今日排程，請確認人員資料。');
+
+    let newMaster:MasterPerson|undefined;
+    if(master){
+      if(!sameIdentity(master,person))throw new Error('公司大名單與今日排程的人員資料不一致，請確認人員資料。');
+      const companyKey=normalizeCompanyName(master.companyName);
+      const companyPeople=await rosterDb.masterPeople.where('companyKey').equals(companyKey).toArray();
+      const matches=companyPeople.filter(row=>row.employeeNo===master.employeeNo);
+      const masterIdMatches=companyPeople.filter(row=>normalizeNationalId(row.nationalId)===normalizeNationalId(master.nationalId));
+      if(masterIdMatches.length>1)throw new Error('公司大名單中此身分證對應多筆人員，請至名單管理確認。');
+      if(matches.length>1)throw new Error('公司大名單中此工號對應多筆人員，請至名單管理確認。');
+      if(matches.some(row=>!sameIdentity(row,master)))throw new Error('此工號已存在於公司大名單且人員資料不同，請確認人員資料。');
+      if(masterIdMatches.some(row=>row.employeeNo!==master.employeeNo))throw new Error('此身分證已存在於公司大名單，請確認人員資料。');
+      if(!matches.length){
+        newMaster={...master,companyKey,nationalId:normalizeNationalId(master.nationalId),originalActivity:master.originalActivity.trim()||master.item,updatedAt:new Date().toISOString()};
+        delete newMaster.id;
+      }
+    }
+
+    const prior=employeeMatches[0];
+    const next=prior?withoutSessionId(prior):{...person,nationalId:normalizeNationalId(person.nationalId),sequence:existing.reduce((max,row)=>Math.max(max,row.sequence),0)+1};
+    if(!prior)await rosterDb.preparedPeople.add({...next,sessionId});
+    if(newMaster)await rosterDb.masterPeople.add(newMaster);
+    return next;
+  });
 }
 /** Removes only one day's locally prepared schedule. Company master data and its lock are untouched. */
 export const clearPreparedSchedule=(sessionId:string)=>rosterDb.preparedPeople.where('sessionId').equals(sessionId).delete();
