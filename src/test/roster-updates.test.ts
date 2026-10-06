@@ -109,7 +109,7 @@ describe('增量匯入檔案驗證',()=>{
   });
 
   it.each(['工號','姓名','身分證','性別','活動項目(原始)','項目'])('必要欄位 %s 空白時阻止匯入',field=>{
-    expect(()=>parseMasterRows([excelRow('A001',{[field]:'　 '})],'ITRI')).toThrow(`缺少必要資料：${field}`);
+    expect(()=>parseMasterRows([excelRow('A001',{[field]:'　 '})],'ITRI')).toThrow(`缺少：${field}`);
   });
 
   it('可選分機可以空白，文字工號保留前導零',()=>{

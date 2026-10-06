@@ -19,8 +19,8 @@ export function parseMasterRows(raw:Record<string,unknown>[],companyName:string)
   const now=new Date().toISOString();
   const entries=raw.map((row,index)=>({row,sourceRow:typeof row.__rowNum__==='number'?row.__rowNum__+1:index+2})).filter(({row})=>Object.values(row).some(value=>String(value??'').trim()));
   const people=entries.map(({row,sourceRow})=>({sourceRow,companyName,companyKey:normalizeCompanyName(companyName),employeeNo:text(row,map.employeeNo),name:text(row,map.name),nationalId:normalizeNationalId(text(row,map.nationalId)),gender:text(row,map.gender),originalActivity:text(row,map.originalActivity),item:text(row,map.item),extension:text(row,map.extension),updatedAt:now}));
-  assertUniqueImportedEmployees(people);
   assertCompleteImportedPeople(people);
+  assertUniqueImportedEmployees(people);
   return people.map((person):MasterPerson=>{const result={...person};delete (result as Partial<typeof result>).sourceRow;return result;});
 }
 export function parseDailyRows(raw:Record<string,unknown>[]){

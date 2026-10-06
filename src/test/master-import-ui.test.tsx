@@ -1,6 +1,7 @@
 import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
+import * as XLSX from 'xlsx';
 import {RosterManager} from '../features/roster/RosterManager';
 import * as database from '../features/roster/db';
 import {readMasterFile} from '../features/roster/excel';
@@ -132,6 +133,71 @@ describe('公司大名單更新操作',()=>{
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('本次匯入檔案有重複工號：A004');
     expect(await database.getCompanyMaster('ITRI')).toEqual(before);
     expect(input.disabled).toBe(false);
+  });
+
+  it('實際 Excel 匯入一次列出所有缺漏資料，保留原始列號且完全不更新名單',async()=>{
+    await render(oldMaster);
+    const before=await database.getCompanyMaster('ITRI');
+    const beforeSettings=await database.rosterDb.companySettings.get('ITRI');
+    const worksheet=XLSX.utils.aoa_to_sheet([
+      ['工號','姓名','身分證','性別','活動項目(原始)','項目','院內分機'],
+      ['A004','完整人員','D123456789','女','一般健檢','一般',''],
+      ['A005','缺身分證','','男','一般健檢','一般','1234'],
+      [],
+      ['A006','','B123456789','','','',''],
+      ['','未填工號','C123456789','女','一般健檢','',''],
+    ]);
+    const workbook=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook,worksheet,'公司大名單');
+    const bytes=XLSX.write(workbook,{type:'array',bookType:'xlsx'}) as ArrayBuffer;
+    const file=new File([bytes],'multiple-missing-fields.xlsx',{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    // jsdom's File does not expose Blob.arrayBuffer; keep the actual XLSX bytes
+    // while providing the browser API that the production reader consumes.
+    Object.defineProperty(file,'arrayBuffer',{value:async()=>bytes});
+    const actualExcel=await vi.importActual<typeof import('../features/roster/excel')>('../features/roster/excel');
+    upload.mockImplementationOnce(actualExcel.readMasterFile);
+    const input=container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input,'files',{value:[file],configurable:true});
+    await act(async()=>{input.dispatchEvent(new Event('change',{bubbles:true}));});
+    await until(()=>container.querySelector('[role="alert"]')!==null);
+    const alert=container.querySelector<HTMLElement>('[role="alert"]')!;
+    const expected='本次匯入檔案有 3 筆資料不完整，請確認後重新匯入。\n\n'+[
+      '第 3 列｜工號 A005｜缺身分證｜缺少：身分證',
+      '第 5 列｜工號 A006｜姓名未填｜缺少：姓名、性別、活動項目(原始)、項目',
+      '第 6 列｜工號未填｜未填工號｜缺少：工號、項目',
+    ].join('\n');
+    expect(alert.textContent).toBe(expected);
+    expect(alert.classList.contains('max-h-80')).toBe(true);
+    expect(alert.classList.contains('overflow-y-auto')).toBe(true);
+    const errorText=alert.querySelector('span')!;
+    expect(errorText.classList.contains('min-w-0')).toBe(true);
+    expect(errorText.classList.contains('whitespace-pre-line')).toBe(true);
+    expect(errorText.classList.contains('break-words')).toBe(true);
+    expect(modal()).toBeNull();
+    expect(await database.getCompanyMaster('ITRI')).toEqual(before);
+    expect(await database.rosterDb.companySettings.get('ITRI')).toEqual(beforeSettings);
+    expect(input.disabled).toBe(false);
+    expect(notices).not.toHaveBeenCalled();
+  });
+
+  it('更新預覽保留多行錯誤，限制面板高度並允許捲動與重試',async()=>{
+    await render(oldMaster);
+    const before=await database.getCompanyMaster('ITRI');
+    const beforeSettings=await database.rosterDb.companySettings.get('ITRI');
+    await selectFile([person('A004')]);
+    const details='本次匯入檔案有 2 筆資料不完整，請確認後重新匯入。\n\n第 2 列｜工號 A004｜人員 A004｜缺少：性別\n第 5 列｜工號 A005｜人員 A005｜缺少：項目';
+    vi.spyOn(database,'mergeCompanyMaster').mockRejectedValueOnce(new Error(details));
+    await click(button('確認增量更新'));
+    await until(()=>modal()?.querySelector('[role="alert"]')!=null);
+    const alert=modal()!.querySelector<HTMLElement>('[role="alert"]')!;
+    expect(alert.textContent).toBe(`大名單更新失敗：${details}`);
+    for(const className of ['max-h-80','overflow-y-auto','whitespace-pre-line','break-words'])expect(alert.classList.contains(className)).toBe(true);
+    expect(button('確認增量更新').disabled).toBe(false);
+    expect(await database.getCompanyMaster('ITRI')).toEqual(before);
+    expect(await database.rosterDb.companySettings.get('ITRI')).toEqual(beforeSettings);
+    expect(notices).not.toHaveBeenCalled();
+    await click(button('取消'));
+    expect(modal()).toBeNull();
   });
 
   it('寫入失敗保留可重試的預覽並顯示可讀錯誤',async()=>{

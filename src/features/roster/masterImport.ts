@@ -27,10 +27,15 @@ export function assertUniqueImportedEmployees(people:ImportIdentity[]):void {
 const requiredFields={employeeNo:'工號',name:'姓名',nationalId:'身分證',gender:'性別',originalActivity:'活動項目(原始)',item:'項目'} as const;
 
 export function assertCompleteImportedPeople(people:(MasterPerson&{sourceRow?:number})[]):void {
+  const errors:string[]=[];
   people.forEach((person,index)=>{
     const missing=(Object.keys(requiredFields) as (keyof typeof requiredFields)[]).filter(key=>!person[key].trim());
-    if(missing.length)throw new Error(`大名單第 ${person.sourceRow??index+2} 列缺少必要資料：${missing.map(key=>requiredFields[key]).join('、')}`);
+    if(!missing.length)return;
+    const employee=person.employeeNo.trim()?`工號 ${person.employeeNo.trim()}`:'工號未填';
+    const name=person.name.trim()||'姓名未填';
+    errors.push(`第 ${person.sourceRow??index+2} 列｜${employee}｜${name}｜缺少：${missing.map(key=>requiredFields[key]).join('、')}`);
   });
+  if(errors.length)throw new Error(`本次匯入檔案有 ${errors.length} 筆資料不完整，請確認後重新匯入。\n\n${errors.join('\n')}`);
 }
 
 /** Exact employee numbers are intentional: 00125 and 125 are separate people. */
