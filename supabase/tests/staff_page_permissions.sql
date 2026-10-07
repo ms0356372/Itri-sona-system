@@ -265,7 +265,8 @@ select pg_temp.assert_permission(not exists(
       'check_in_participant','set_waiting_status','call_participant','set_room_away','start_examination',
       'complete_examination','enqueue_additional_examination','update_session_room_count','clear_session_schedule',
       'delete_health_session','close_health_session','acknowledge_device_clear',
-      'claim_room','switch_room_claim','heartbeat_room_claim','release_room_claim','list_room_claims')
+      'claim_room','switch_room_claim','heartbeat_room_claim','release_room_claim','list_room_claims',
+      'simple_check_in_participant')
 ),'all authenticated-callable SECURITY DEFINER functions covered by permission inventory');
 select pg_temp.assert_permission((select count(*)=4 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
   where n.nspname='public' and p.proname in ('is_active_staff','can_use_registration','can_use_console','can_use_room')

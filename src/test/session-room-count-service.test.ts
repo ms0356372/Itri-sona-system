@@ -23,8 +23,8 @@ describe('場次診間數量資料與更新',()=>{
   it('新增場次預設4間，寫入同一health_sessions且不由前端重設rooms',async()=>{
     expect(await createSession('  測試公司  ','2026-10-07','worker-1')).toMatchObject({id:'session-1',roomCount:DEFAULT_ROOM_COUNT});
     expect(remote.from).toHaveBeenCalledTimes(1);expect(remote.from).toHaveBeenCalledWith('health_sessions');
-    expect(remote.insert).toHaveBeenCalledWith({company_name:'測試公司',session_date:'2026-10-07',created_by:'worker-1',room_count:DEFAULT_ROOM_COUNT});
-    expect(remote.select).toHaveBeenCalledWith('id,session_date,company_name,status,room_count');
+    expect(remote.insert).toHaveBeenCalledWith({company_name:'測試公司',session_date:'2026-10-07',created_by:'worker-1',room_count:DEFAULT_ROOM_COUNT,workflow_mode:'standard'});
+    expect(remote.select).toHaveBeenCalledWith('id,session_date,company_name,status,room_count,workflow_mode');
     expect(remote.rpc).not.toHaveBeenCalled();
   });
 
@@ -44,7 +44,7 @@ describe('場次診間數量資料與更新',()=>{
     remote.order.mockReturnValueOnce({order:remote.order}).mockResolvedValueOnce({data:[{...sessionRow,room_count:null},{...sessionRow,room_count:undefined},{...sessionRow,id:'historical',session_date:'2025-10-07',room_count:7}],error:null});
     const sessions=await listSessions();
     expect(sessions.map(session=>session.roomCount)).toEqual([DEFAULT_ROOM_COUNT,DEFAULT_ROOM_COUNT,7]);
-    expect(remote.select).toHaveBeenCalledWith('id,session_date,company_name,status,room_count');
+    expect(remote.select).toHaveBeenCalledWith('id,session_date,company_name,status,room_count,workflow_mode');
   });
 
   it.each([6,4])('增加或安全減少至%s間透過單一原子RPC並使用返回的場次資料',async roomCount=>{

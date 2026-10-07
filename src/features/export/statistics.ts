@@ -1,13 +1,19 @@
 import type {Examination,Participant,UltrasoundItemName} from '../../types';
 import {ultrasoundItemNames} from '../../types';
+import {compareQueueNumbers} from '../workflow/mode';
 
 export const isCheckedIn=(participant:Participant)=>participant.checkedInAt!==null||Boolean(participant.checkinNo?.trim());
 
 const checkinSequence=(value:string|null)=>Number(value?.match(/\d+/)?.[0]??Number.MAX_SAFE_INTEGER);
 
 export function buildCheckinReport(participants:Participant[]){
-  const sorted=[...participants].sort((a,b)=>a.slot.localeCompare(b.slot,'zh-TW',{numeric:true})||a.groupCode.localeCompare(b.groupCode)||checkinSequence(a.checkinNo)-checkinSequence(b.checkinNo)||a.sequence-b.sequence);
+  const sorted=[...participants].sort((a,b)=>(a.slot??'').localeCompare(b.slot??'','zh-TW',{numeric:true})||(a.groupCode??'').localeCompare(b.groupCode??'')||checkinSequence(a.checkinNo)-checkinSequence(b.checkinNo)||a.sequence-b.sequence);
   return{checkedIn:sorted.filter(isCheckedIn),notCheckedIn:sorted.filter(participant=>!isCheckedIn(participant))};
+}
+
+export function buildSimpleCheckinReport(participants:Participant[]){
+  const checkedIn=participants.filter(isCheckedIn).sort(compareQueueNumbers);
+  return{checkedIn};
 }
 
 export function formatDuration(seconds:number|null|undefined){

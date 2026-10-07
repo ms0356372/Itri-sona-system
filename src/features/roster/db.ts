@@ -34,6 +34,10 @@ export class RosterDatabase extends Dexie {
       const settings=await transaction.table<CompanyRosterSettings>('companySettingsByKey').toArray();
       await transaction.table('companySettings').bulkPut(settings);
     });
+    // Both workflows share this store. Add an indexed company/identity lookup
+    // without rebuilding people, prepared schedules or company lock settings.
+    this.version(7).stores({masterPeople:'++id, companyKey, employeeNo, name, nationalId, [companyKey+employeeNo], [companyKey+nationalId]'}).upgrade(transaction=>
+      transaction.table<MasterPerson>('masterPeople').toCollection().modify(person=>{person.nationalId=normalizeNationalId(person.nationalId);}));
   }
 }
 
@@ -43,7 +47,7 @@ export async function replaceCompanyMaster(companyName:string,people:MasterPerso
   const companyKey=normalizeCompanyName(companyName);
   assertUniqueImportedEmployees(people);
   assertCompleteImportedPeople(people);
-  await rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{await rosterDb.masterPeople.where('companyKey').equals(companyKey).delete();await rosterDb.masterPeople.bulkAdd(people.map(person=>({...person,companyName,companyKey})));await rosterDb.companySettings.put({companyName,companyKey,masterLocked:true,updatedAt:new Date().toISOString()});});
+  await rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{await rosterDb.masterPeople.where('companyKey').equals(companyKey).delete();await rosterDb.masterPeople.bulkAdd(people.map(person=>({...person,companyName,companyKey,nationalId:normalizeNationalId(person.nationalId)})));await rosterDb.companySettings.put({companyName,companyKey,masterLocked:true,updatedAt:new Date().toISOString()});});
 }
 export async function mergeCompanyMaster(companyName:string,people:MasterPerson[]):Promise<MasterUpdateSummary>{
   assertUniqueImportedEmployees(people);
@@ -78,8 +82,8 @@ export const getCompanyMaster=(companyName:string)=>rosterDb.masterPeople.where(
 export const getCompanyMasterLockState=async(companyName:string)=>(await rosterDb.companySettings.get(normalizeCompanyName(companyName)))?.masterLocked;
 export const isCompanyMasterLocked=async(companyName:string)=>(await rosterDb.companySettings.get(normalizeCompanyName(companyName)))?.masterLocked??false;
 export const setCompanyMasterLocked=async(companyName:string,masterLocked:boolean)=>rosterDb.companySettings.put({companyName,companyKey:normalizeCompanyName(companyName),masterLocked,updatedAt:new Date().toISOString()});
-export const addMasterPerson=(person:MasterPerson)=>rosterDb.masterPeople.add({...person,companyKey:normalizeCompanyName(person.companyName)});
-export const updateMasterPerson=async(id:number,changes:Partial<MasterPerson>)=>{const existing=await rosterDb.masterPeople.get(id);const companyName=changes.companyName??existing?.companyName;return rosterDb.masterPeople.update(id,{...changes,...(companyName?{companyKey:normalizeCompanyName(companyName)}:{}),updatedAt:new Date().toISOString()});};
+export const addMasterPerson=(person:MasterPerson)=>rosterDb.masterPeople.add({...person,companyKey:normalizeCompanyName(person.companyName),nationalId:normalizeNationalId(person.nationalId)});
+export const updateMasterPerson=async(id:number,changes:Partial<MasterPerson>)=>{const existing=await rosterDb.masterPeople.get(id);const companyName=changes.companyName??existing?.companyName;return rosterDb.masterPeople.update(id,{...changes,...(companyName?{companyKey:normalizeCompanyName(companyName)}:{}),...(changes.nationalId!==undefined?{nationalId:normalizeNationalId(changes.nationalId)}:{}),updatedAt:new Date().toISOString()});};
 export const clearCompanyMaster=async(companyName:string)=>{const companyKey=normalizeCompanyName(companyName);return rosterDb.transaction('rw',[rosterDb.masterPeople,rosterDb.companySettings],async()=>{await rosterDb.masterPeople.where('companyKey').equals(companyKey).delete();await rosterDb.companySettings.delete(companyKey);});};
 export async function replacePreparedSchedule(sessionId:string,people:PreparedPerson[]){
   await rosterDb.transaction('rw',rosterDb.preparedPeople,async()=>{await rosterDb.preparedPeople.where('sessionId').equals(sessionId).delete();await rosterDb.preparedPeople.bulkPut(people.map(person=>({...person,sessionId})));});

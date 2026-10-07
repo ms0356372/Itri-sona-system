@@ -85,6 +85,11 @@ async function loadPerson(){
   await click(button('腹部超音波'));
   expect(container.querySelector('.room-history')?.textContent).toContain('既往腹部結果');
 }
+async function selectSimplePerson(id='person-1'){
+  await click(button('今日名單'));
+  const selector=container.querySelector<HTMLSelectElement>('[aria-label="今日受檢者"]')!;
+  await act(async()=>{selector.value=id;selector.dispatchEvent(new Event('change',{bubbles:true}));});
+}
 function expectPatientAndHistory(){
   expect(container.querySelector('.room-patient-name')?.textContent).toBe('王小明');
   expect(container.querySelector('.room-patient-details')?.textContent).toContain('00125');
@@ -693,5 +698,80 @@ describe('超音波診間暫時離開',()=>{
     await render([participant({id:'next-person',sessionId:next.id,name:'新場次人員'})],next);
     expect(container.querySelector('.room-patient')).toBeNull();expect(button('暫時離開').disabled).toBe(false);
     expect(button('查詢').disabled).toBe(false);expect(queryInput().value).toBe('');
+  });
+
+  it('簡易診間使用今日名單與純數字號碼，不顯示時段，仍以原本機工號索引讀歷年資料',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const first=participant({groupCode:null,slot:null,queueNumber:1,checkinNo:'1'});
+    await render([participant({id:'ten',name:'十號',groupCode:null,slot:null,queueNumber:10,checkinNo:'10'}),participant({id:'two',name:'二號',groupCode:null,slot:null,checkinNo:'2'}),first],simple);
+    expect(container.querySelector('.room-search-modes')?.textContent).toBe('身分證工號今日名單');
+    await click(button('今日名單'));
+    const selector=container.querySelector<HTMLSelectElement>('[aria-label="今日受檢者"]')!;
+    expect(Array.from(selector.options).slice(1).map(option=>option.textContent?.split(' ')[0])).toEqual(['1','2','10']);
+    await act(async()=>{selector.value='person-1';selector.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(container.querySelector('.room-patient-number')?.textContent).toBe('1');
+    expect(container.querySelector('.room-patient-details')?.textContent).not.toContain('時段');expect(container.querySelector('.room-patient-details')?.textContent).toContain('00125');
+    expect(remote.historyByEmployee).toHaveBeenCalledWith('00125');expect(remote.examination).toHaveBeenCalledWith('person-1');
+  });
+
+  it('簡易受檢者方案一般仍可手動選超音波、開始與完成，保留雲端時間及實際項目',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const person=participant({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',plannedItems:['一般']});
+    remote.start.mockImplementationOnce(async()=>{updateRoom('診間 1','in_progress');return examination();});
+    await render([person],simple);await selectSimplePerson();
+    expect(button('開始檢查').disabled).toBe(true);
+    await click(button('腹部超音波'));await click(button('甲狀腺超音波'));
+    expect(button('開始檢查').disabled).toBe(false);await click(button('開始檢查'));
+    expect(remote.start).toHaveBeenCalledWith('person-1','診間 1',['腹部超音波','甲狀腺超音波']);
+    expect(container.querySelector('.room-patient-number')?.textContent).toBe('12');expect(container.querySelector('.room-patient-details')?.textContent).not.toContain('時段');
+    await click(button('完成檢查'));const choices=dialog()!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');await click(choices[1]);
+    await click(button('確認完成並同步雲端'));
+    expect(remote.complete).toHaveBeenCalledWith('exam-1','person-1','診間 1',['腹部超音波']);
+    expect(container.textContent).toContain('檢查已完成');expect(container.textContent).toContain('00:01:05');expect(container.textContent).toContain('1 件');
+    expect(changed).toHaveBeenCalledTimes(2);expect(remote.start).toHaveBeenCalledTimes(1);expect(remote.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('簡易追加第二輪沿用waiting examination、選擇項目與開始完成RPC，不另造檢查流程',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const person=participant({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',plannedItems:['一般']});
+    const waiting=examination({id:'exam-2',roundNo:2,status:'waiting',roomId:null,startedAt:null,selectedItems:['甲狀腺超音波']});
+    const running={...waiting,status:'in_progress' as const,roomId:'診間 1',startedAt:'2026-10-07T00:04:00Z'};
+    remote.examination.mockResolvedValue(waiting);remote.start.mockResolvedValue(running);
+    remote.complete.mockResolvedValue({...running,status:'completed',completedAt:'2026-10-07T00:04:45Z',durationSeconds:45,actualItems:['甲狀腺超音波'],itemCount:1});
+    await render([person],simple);await selectSimplePerson();
+    expect(container.querySelector('.room-patient')?.textContent).toContain('追加檢查');expect(container.querySelector('.room-patient-details')?.textContent).toContain('第 2 輪');
+    expect(button('甲狀腺超音波').getAttribute('aria-pressed')).toBe('true');await click(button('開始檢查'));
+    expect(remote.start).toHaveBeenCalledWith('person-1','診間 1',['甲狀腺超音波']);await click(button('完成檢查'));await click(button('確認完成並同步雲端'));
+    expect(remote.complete).toHaveBeenCalledWith('exam-2','person-1','診間 1',['甲狀腺超音波']);expect(container.textContent).toContain('00:00:45');expect(container.textContent).toContain('檢查已完成');
+  });
+
+  it('簡易診間仍要求報到與實際項目，不因數字queue存在而跳過checkedIn guard',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const person=participant({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',checkedInAt:null,status:'未報到',plannedItems:['一般']});
+    await render([person],simple);await selectSimplePerson();await click(button('腹部超音波'));await click(button('開始檢查'));
+    expect(container.textContent).toContain('此受檢者尚未報到');expect(remote.start).not.toHaveBeenCalled();expect(remote.complete).not.toHaveBeenCalled();
+  });
+
+  it('簡易模式尚未確認或失去設備租約時仍禁止載入、開始及完成，保留原claim guard',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const person=participant({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',plannedItems:['一般']});
+    remote.claimOwned=false;remote.claimConfirmed=false;remote.claimLoading=true;
+    await render([person],simple);expect(button('今日名單').disabled).toBe(true);expect(button('開始檢查').disabled).toBe(true);
+    expect(remote.roomExamination).not.toHaveBeenCalled();expect(remote.historyByEmployee).not.toHaveBeenCalled();
+    remote.claimOwned=true;remote.claimConfirmed=true;remote.claimLoading=false;remote.examination.mockResolvedValue(examination());
+    await render([person],simple);await selectSimplePerson();await click(button('完成檢查'));
+    const staleFinish=clickHandler(button('確認完成並同步雲端'));const staleAway=clickHandler(button('暫時離開'));
+    remote.claimOwned=false;remote.claimConfirmed=false;remote.claimRoom=null;await render([person],simple);
+    expect(dialog()).toBeNull();expect(container.querySelector('.room-patient')).toBeNull();expect(button('開始檢查').disabled).toBe(true);
+    await act(async()=>{staleFinish();staleAway();});expect(remote.start).not.toHaveBeenCalled();expect(remote.complete).not.toHaveBeenCalled();expect(remote.setAway).not.toHaveBeenCalled();
+  });
+
+  it('簡易診間暫時離開仍保留數字號碼與項目，返回後才能開始檢查',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const person=participant({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',plannedItems:['一般']});
+    await render([person],simple);await selectSimplePerson();await click(button('腹部超音波'));await click(button('暫時離開'));
+    expect(container.querySelector('.room-patient-number')?.textContent).toBe('12');expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('true');expect(button('開始檢查').disabled).toBe(true);
+    await click(button('開始檢查'));expect(remote.start).not.toHaveBeenCalled();await click(button('返回診間'));expect(button('開始檢查').disabled).toBe(false);
+    expect(remote.setAway.mock.calls).toEqual([[session.id,'診間 1',true],[session.id,'診間 1',false]]);
   });
 });
