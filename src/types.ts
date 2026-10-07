@@ -11,3 +11,6 @@ export interface PendingHistoryRecord{id?:number;identity:string;date:string;typ
 export interface Examination {id:string;participantId:string;roundNo:number;roomId:string|null;startedAt:string|null;completedAt:string|null;durationSeconds:number|null;selectedItems:UltrasoundItemName[];actualItems:UltrasoundItemName[];itemCount:number;status:'waiting'|'in_progress'|'completed'}
 
 export interface ImportResult {inserted:number;skipped:number}
+
+export type RoomStatus='idle'|'in_progress'|'away';
+export interface RoomState {sessionId:string;roomId:string;status:RoomStatus;updatedAt:string|null}

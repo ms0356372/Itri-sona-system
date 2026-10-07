@@ -2,12 +2,13 @@ import {requireSupabase} from '../../lib/supabase';
 import type {Examination,UltrasoundItemName} from '../../types';
 import {ultrasoundItemNames} from '../../types';
 import {db} from '../history/db';
+import {normalizeRoomId} from '../room/status';
 
 type ExaminationRow={id:string;participant_id:string;round_no:number;room_id:string|null;started_at:string|null;completed_at:string|null;duration_seconds:number|null;selected_items?:string[];actual_items:string[];item_count:number;status:Examination['status']};
-const mapExamination=(row:ExaminationRow):Examination=>({id:row.id,participantId:row.participant_id,roundNo:row.round_no,roomId:row.room_id,startedAt:row.started_at,completedAt:row.completed_at,durationSeconds:row.duration_seconds,selectedItems:(row.selected_items??[]) as UltrasoundItemName[],actualItems:row.actual_items as UltrasoundItemName[],itemCount:row.item_count,status:row.status});
+const mapExamination=(row:ExaminationRow):Examination=>({id:row.id,participantId:row.participant_id,roundNo:row.round_no,roomId:row.room_id===null?null:normalizeRoomId(row.room_id),startedAt:row.started_at,completedAt:row.completed_at,durationSeconds:row.duration_seconds,selectedItems:(row.selected_items??[]) as UltrasoundItemName[],actualItems:row.actual_items as UltrasoundItemName[],itemCount:row.item_count,status:row.status});
 
 export async function getExamination(participantId:string){const{data,error}=await requireSupabase().from('examinations').select('*').eq('participant_id',participantId).in('status',['waiting','in_progress']).order('round_no',{ascending:false}).limit(1).maybeSingle();if(error)throw error;return data?mapExamination(data as ExaminationRow):null;}
-export async function getRoomExamination(sessionId:string,roomId:string){const{data,error}=await requireSupabase().from('examinations').select('*,participants!inner(session_id)').eq('participants.session_id',sessionId).eq('room_id',roomId).eq('status','in_progress').maybeSingle();if(error)throw error;return data?mapExamination(data as unknown as ExaminationRow):null;}
+export async function getRoomExamination(sessionId:string,roomId:string){const canonical=normalizeRoomId(roomId);const aliases=/^診間 [1-4]$/.test(canonical)?[canonical,canonical.replace(' ','')]:[canonical];const{data,error}=await requireSupabase().from('examinations').select('*,participants!inner(session_id)').eq('participants.session_id',sessionId).in('room_id',aliases).eq('status','in_progress').maybeSingle();if(error)throw error;return data?mapExamination(data as unknown as ExaminationRow):null;}
 export async function listExaminations(participantIds:string[]){if(!participantIds.length)return[];const{data,error}=await requireSupabase().from('examinations').select('*').in('participant_id',participantIds).order('round_no');if(error)throw error;return(data as ExaminationRow[]).map(mapExamination);}
 export function isUltrasoundItemName(item:string):item is UltrasoundItemName{return ultrasoundItemNames.some(name=>name===item);}
 export function getPlannedUltrasoundItems(items:readonly string[]):UltrasoundItemName[]{return items.filter(isUltrasoundItemName);}
