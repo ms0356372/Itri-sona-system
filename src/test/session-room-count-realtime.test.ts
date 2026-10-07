@@ -15,7 +15,7 @@ describe('場次設定Realtime訂閱',()=>{
     channel.subscribe.mockImplementation((callback:(value:string)=>void)=>{status=callback;return channel;});
     remote.channel.mockReturnValue(channel);
     const onChange=vi.fn();const cleanup=subscribeSessions(onChange);
-    expect(channel.on).toHaveBeenCalledWith('postgres_changes',{event:'*',schema:'public',table:'health_sessions'},onChange);
+    expect(channel.on).toHaveBeenCalledWith('postgres_changes',{event:'*',schema:'public',table:'health_sessions'},expect.any(Function));
     change();status('SUBSCRIBED');status('CHANNEL_ERROR');status('SUBSCRIBED');
     expect(onChange).toHaveBeenCalledTimes(3);
     cleanup();expect(remote.removeChannel).toHaveBeenCalledWith(channel);

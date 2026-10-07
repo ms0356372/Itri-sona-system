@@ -14,11 +14,11 @@ import {clearPreparedSchedule} from './features/roster/db';
 import {UltrasoundConsole} from './features/console/Console';
 import {UltrasoundRoom} from './features/room/UltrasoundRoom';
 import {RoomStatusOverview} from './features/room/RoomStatusOverview';
-import {subscribeSession,subscribeSessions} from './features/sync/realtime';
+import {subscribeParticipants,subscribeSessions} from './features/sync/realtime';
+import {createRefreshCoalescer,type RefreshCoalescer} from './features/sync/refresh';
 import {clearSessionSchedule,deleteSession} from './features/sessions/management';
 import {cleanupSummary} from './features/cleanup/summary';
 import {listExaminations} from './features/examination/service';
-import {downloadCheckinReport,downloadUltrasoundReport} from './features/export/sessionExport';
 import {buildCheckinReport} from './features/export/statistics';
 import type {Participant,Session} from './types';
 import {friendlyError} from './lib/errors';
@@ -55,14 +55,20 @@ export default function App(){
   const participantRequest=useRef(0);
   const authRequest=useRef(0);
   const activeSessionId=useRef(current?.id??null);activeSessionId.current=current?.id??null;
+  const participantIds=useRef<ReadonlySet<string>>(new Set());
+  participantIds.current=new Set(participants.filter(person=>person.sessionId===current?.id).map(person=>person.id));
+  const sessionRefresh=useRef<{version:number;controller:RefreshCoalescer}|null>(null);
+  const participantRefresh=useRef<{version:number;sessionId:string;controller:RefreshCoalescer}|null>(null);
   const accessKey=[userId,access.ready,access.permissions?.canRegistration,access.permissions?.canConsole,access.permissions?.canRoom].join(':');
   const workAccess=useRef({key:accessKey,userId,ready:access.ready,permissions:access.permissions,version:0});
   if(workAccess.current.key!==accessKey){
     workAccess.current={key:accessKey,userId,ready:access.ready,permissions:access.permissions,version:workAccess.current.version+1};
     sessionRequest.current++;participantRequest.current++;
   }
+  const accessVersion=workAccess.current.version;
+  const currentId=current?.id??null;
 
-  const reloadSessions=useCallback(async()=>{
+  const readSessions=useCallback(async()=>{
     const context=workAccess.current;
     if(!context.ready)return;
     const request=++sessionRequest.current;
@@ -76,17 +82,17 @@ export default function App(){
       if(context.version===workAccess.current.version&&workAccess.current.ready)throw error;
     }
   },[]);
-  const reloadParticipants=useCallback(async(session=current)=>{
+  const reloadSessions=useCallback(async()=>{
     const context=workAccess.current;
-    if(!context.ready||(session?.id??null)!==activeSessionId.current)return;
-    const request=++participantRequest.current;
-    try{
-      const values=session?await listParticipants(session.id):[];
-      if(workAccess.current.ready&&context.version===workAccess.current.version&&request===participantRequest.current&&(session?.id??null)===activeSessionId.current)setParticipants(values);
-    }catch(error){
-      if(context.version===workAccess.current.version&&workAccess.current.ready&&(session?.id??null)===activeSessionId.current)throw error;
-    }
-  },[current]);
+    const scope=sessionRefresh.current;
+    if(context.ready&&scope?.version===context.version)await scope.controller.refresh(true);
+  },[]);
+  const reloadParticipants=useCallback(async(session?:Session|null)=>{
+    const context=workAccess.current;
+    const scope=participantRefresh.current;
+    const id=session===undefined?activeSessionId.current:session?.id??null;
+    if(context.ready&&scope?.version===context.version&&scope.sessionId===id&&id===activeSessionId.current)await scope.controller.refresh(true);
+  },[]);
 
   useEffect(()=>{
     if(!supabase){setChecking(false);return;}
@@ -108,20 +114,45 @@ export default function App(){
     if(access.ready&&effectivePage){setPage(effectivePage);setPageOwner(userId);}
   },[access.ready,effectivePage,userId]);
   useEffect(()=>{
-    if(access.ready)void reloadSessions().catch(error=>setNotice(friendlyError(error)));
-  },[access.ready,userId,reloadSessions]);
-  useEffect(()=>{
     if(!access.ready)return;
-    const reload=()=>void reloadSessions().catch(error=>setNotice(friendlyError(error)));
-    const unsubscribe=subscribeSessions(reload);
-    return unsubscribe;
-  },[access.ready,userId,reloadSessions]);
+    const scope={version:accessVersion,controller:createRefreshCoalescer(readSessions)};
+    sessionRefresh.current=scope;
+    const showError=(error:unknown)=>{if(workAccess.current.ready&&workAccess.current.version===scope.version)setNotice(friendlyError(error));};
+    const refresh=(invalidate=true)=>void scope.controller.schedule(invalidate).catch(showError);
+    const unsubscribe=subscribeSessions(()=>refresh(),status=>{if(status==='SUBSCRIBED')refresh(false);});
+    void scope.controller.refresh().catch(showError);
+    return()=>{unsubscribe();scope.controller.dispose();if(sessionRefresh.current===scope)sessionRefresh.current=null;};
+  },[access.ready,userId,accessVersion,readSessions]);
   useEffect(()=>{
-    if(access.ready&&current)void reloadParticipants(current).catch(error=>setNotice(friendlyError(error)));
-    else setParticipants([]);
-  },[access.ready,userId,current,reloadParticipants]);
-  useEffect(()=>{if(access.ready&&current)localStorage.setItem('itri-current-session',current.id);},[access.ready,current]);
-  useEffect(()=>access.ready&&current?subscribeSession(current.id,()=>void reloadParticipants(current).catch(error=>setNotice(friendlyError(error)))):undefined,[access.ready,userId,current,reloadParticipants]);
+    if(!access.ready||!currentId){setParticipants([]);return;}
+    const version=accessVersion;
+    // PK-only DELETE events can precede the first list response. Tombstones
+    // prevent that response from restoring a deleted participant.
+    const deletedIds=new Set<string>();
+    const scope={version,sessionId:currentId,controller:createRefreshCoalescer(async()=>{
+      if(!workAccess.current.ready||version!==workAccess.current.version||currentId!==activeSessionId.current)return;
+      const request=++participantRequest.current;
+      try{
+        const values=await listParticipants(currentId);
+        if(workAccess.current.ready&&version===workAccess.current.version&&request===participantRequest.current&&currentId===activeSessionId.current){
+          setParticipants(values.filter(person=>!deletedIds.has(person.id)));
+        }
+      }catch(error){
+        if(version===workAccess.current.version&&workAccess.current.ready&&currentId===activeSessionId.current)throw error;
+      }
+    })};
+    participantRefresh.current=scope;
+    const showError=(error:unknown)=>{if(workAccess.current.ready&&version===workAccess.current.version&&currentId===activeSessionId.current)setNotice(friendlyError(error));};
+    const refresh=(invalidate=true)=>void scope.controller.schedule(invalidate).catch(showError);
+    const unsubscribe=subscribeParticipants(currentId,()=>refresh(),{
+      getKnownParticipantIds:()=>participantIds.current,
+      onDelete:id=>{deletedIds.add(id);},
+      onStatus:status=>{if(status==='SUBSCRIBED')refresh(false);},
+    });
+    void scope.controller.refresh().catch(showError);
+    return()=>{unsubscribe();scope.controller.dispose();if(participantRefresh.current===scope)participantRefresh.current=null;};
+  },[access.ready,userId,accessVersion,currentId]);
+  useEffect(()=>{if(access.ready&&currentId)localStorage.setItem('itri-current-session',currentId);},[access.ready,currentId]);
 
   if(checking)return <Shell><div className="grid min-h-[60vh] place-items-center text-slate-500">正在確認登入狀態…</div></Shell>;
   if(!auth)return <Shell><Login onLogin={async(email,password)=>{
@@ -169,9 +200,9 @@ export default function App(){
       await reloadSessions();
       if(!canManageRegistration())return;
       setCurrent(session);setNotice('場次建立成功。');
-    }} onImported={async message=>{if(!canManageRegistration())return;await reloadParticipants();registrationNotice(message);}} onCheckedIn={async()=>{if(canManageRegistration())await reloadParticipants();}} onManaged={async(deleted,message)=>{
+    }} onImported={async message=>{if(!canManageRegistration())return;await reloadParticipants();registrationNotice(message);}} onCheckedIn={async()=>{if(canManageRegistration())await reloadParticipants();}} onManaged={async(deleted,message,participantsChanged=true)=>{
       if(!canManageRegistration())return;await reloadSessions();if(!canManageRegistration())return;
-      if(!deleted&&current)await reloadParticipants(current);
+      if(participantsChanged&&!deleted&&current)await reloadParticipants(current);
       registrationNotice(message);
     }} setNotice={registrationNotice}/>:effectivePage==='console'?<UltrasoundConsole canRoom={access.permissions?.canRoom===true} current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)} onError={message=>setNotice('操作失敗：'+friendlyError(message))}/>:<UltrasoundRoom current={current} participants={currentParticipants} claimState={roomClaims} onChanged={()=>reloadParticipants(current)}/>}
   </Shell>;
@@ -181,16 +212,37 @@ function Shell({children,header,navigation,room=false}:{children:React.ReactNode
 function Notice({text,clear}:{text:string;clear:()=>void}){return <div role="status" className="mb-4 flex justify-between rounded-xl border border-teal-200 bg-teal-50 p-4 text-teal-900"><span>{text}</span><button aria-label="關閉訊息" className="font-bold" onClick={clear}>×</button></div>}
 function Login({onLogin,busy}:{onLogin:(email:string,password:string)=>Promise<void>;busy:boolean}){const[email,setEmail]=useState('');const[password,setPassword]=useState('');const[error,setError]=useState('');return <div className="mx-auto mt-10 max-w-md rounded-2xl bg-white p-6 shadow-sm"><Title title="工作人員登入" subtitle="請使用受管理的 Supabase Auth 工作人員帳號。"/><form onSubmit={async e=>{e.preventDefault();setError('');try{await onLogin(email,password);}catch(reason){setError(friendlyError(reason));}}} className="space-y-4"><label className="block"><span className="label">Email</span><input className="input" type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)}/></label><label className="block"><span className="label">Password</span><input className="input" type="password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button disabled={busy||!isSupabaseConfigured} className="primary w-full disabled:opacity-40">{busy?'登入中…':'登入'}</button></form></div>}
 
-function Registration({authId,sessions,current,participants,onSelect,onCreated,onImported,onCheckedIn,onManaged,setNotice}:{authId:string;sessions:Session[];current:Session|null;participants:Participant[];onSelect:(id:string)=>void;onCreated:(s:Session)=>Promise<void>;onImported:(s:string)=>Promise<void>;onCheckedIn:()=>Promise<void>;onManaged:(deleted:boolean,message:string)=>Promise<void>;setNotice:(s:string)=>void}){
+function Registration({authId,sessions,current,participants,onSelect,onCreated,onImported,onCheckedIn,onManaged,setNotice}:{authId:string;sessions:Session[];current:Session|null;participants:Participant[];onSelect:(id:string)=>void;onCreated:(s:Session)=>Promise<void>;onImported:(s:string)=>Promise<void>;onCheckedIn:()=>Promise<void>;onManaged:(deleted:boolean,message:string,participantsChanged?:boolean)=>Promise<void>;setNotice:(s:string)=>void}){
   const[view,setView]=useState<'work'|'sessions'|'roster'>('work');const[date,setDate]=useState(taiwanToday);const[company,setCompany]=useState('');const[roomCount,setRoomCount]=useState(DEFAULT_ROOM_COUNT);const[busy,setBusy]=useState(false);const[manage,setManage]=useState(false);
   if(view==='roster')return <section><ManagementHeader title="名單管理" onBack={()=>setView('work')}/>{current?<RosterManager key={current.id} current={current} participants={participants} onUploaded={onImported} setNotice={setNotice}/>:<Empty text="請先到場次管理建立或選擇場次。"/>}</section>;
-  if(view==='sessions')return <section><ManagementHeader title="場次管理" onBack={()=>setView('work')}/><div className="mx-auto grid max-w-4xl gap-5 lg:grid-cols-2"><div className="space-y-4 rounded-2xl bg-white p-5 shadow-sm"><h3 className="text-lg font-black">建立今日場次</h3><label className="block"><span className="label">公司名稱</span><input className="input" value={company} onChange={e=>setCompany(e.target.value)}/></label><label className="block"><span className="label">健檢日期</span><input type="date" className="input" value={date} onChange={e=>setDate(e.target.value)}/></label><RoomCountField value={roomCount} onChange={setRoomCount} disabled={busy}/><button disabled={busy||!company.trim()||!date||!isValidRoomCount(roomCount)} className="primary w-full disabled:opacity-40" onClick={async()=>{setBusy(true);try{await onCreated(await createSession(company,date,authId,roomCount));setCompany('');setRoomCount(DEFAULT_ROOM_COUNT);}catch(e){setNotice(friendlyError(e));}finally{setBusy(false);}}}>建立場次</button></div><div className="space-y-4 rounded-2xl bg-white p-5 shadow-sm"><h3 className="text-lg font-black">選擇既有場次</h3><select className="input" aria-label="目前場次" value={current?.id??''} onChange={e=>onSelect(e.target.value)}><option value="">選擇既有場次</option>{sessions.map(s=><option value={s.id} key={s.id}>{s.sessionDate}｜{s.companyName}｜超音波診間：{getRoomCount(s.roomCount)}間</option>)}</select>{current&&<><SessionRoomCountEditor key={current.id} session={current} onSaved={async updated=>{await onManaged(false,`超音波診間數量已更新為 ${getRoomCount(updated.roomCount)} 間。`);}}/><SessionExportPanel session={current} participants={participants} setNotice={setNotice}/><button className="secondary w-full border-amber-400 text-amber-900" onClick={()=>setManage(true)}><Settings size={18}/>清除排程或刪除場次</button></>}</div></div>{manage&&current&&<SessionManager session={current} participants={participants} onClose={()=>setManage(false)} onDone={async(deleted,message)=>{await onManaged(deleted,message);setManage(false);}}/>}</section>;
+  if(view==='sessions')return <section><ManagementHeader title="場次管理" onBack={()=>setView('work')}/><div className="mx-auto grid max-w-4xl gap-5 lg:grid-cols-2"><div className="space-y-4 rounded-2xl bg-white p-5 shadow-sm"><h3 className="text-lg font-black">建立今日場次</h3><label className="block"><span className="label">公司名稱</span><input className="input" value={company} onChange={e=>setCompany(e.target.value)}/></label><label className="block"><span className="label">健檢日期</span><input type="date" className="input" value={date} onChange={e=>setDate(e.target.value)}/></label><RoomCountField value={roomCount} onChange={setRoomCount} disabled={busy}/><button disabled={busy||!company.trim()||!date||!isValidRoomCount(roomCount)} className="primary w-full disabled:opacity-40" onClick={async()=>{setBusy(true);try{await onCreated(await createSession(company,date,authId,roomCount));setCompany('');setRoomCount(DEFAULT_ROOM_COUNT);}catch(e){setNotice(friendlyError(e));}finally{setBusy(false);}}}>建立場次</button></div><div className="space-y-4 rounded-2xl bg-white p-5 shadow-sm"><h3 className="text-lg font-black">選擇既有場次</h3><select className="input" aria-label="目前場次" value={current?.id??''} onChange={e=>onSelect(e.target.value)}><option value="">選擇既有場次</option>{sessions.map(s=><option value={s.id} key={s.id}>{s.sessionDate}｜{s.companyName}｜超音波診間：{getRoomCount(s.roomCount)}間</option>)}</select>{current&&<><SessionRoomCountEditor key={current.id} session={current} onSaved={async updated=>{await onManaged(false,`超音波診間數量已更新為 ${getRoomCount(updated.roomCount)} 間。`,false);}}/><SessionExportPanel session={current} participants={participants} setNotice={setNotice}/><button className="secondary w-full border-amber-400 text-amber-900" onClick={()=>setManage(true)}><Settings size={18}/>清除排程或刪除場次</button></>}</div></div>{manage&&current&&<SessionManager session={current} participants={participants} onClose={()=>setManage(false)} onDone={async(deleted,message)=>{await onManaged(deleted,message);setManage(false);}}/>}</section>;
   return <section className="registration-workspace"><div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><h2 className="text-2xl font-black">健檢報到站</h2><p className="mt-1 text-base font-bold text-teal-900">{current?`${current.companyName} ｜ ${current.sessionDate.replaceAll('-','/')} ｜ 今日排程 ${participants.length} 人`:'尚未選擇今日場次'}</p></div><div className="flex gap-2"><button className="secondary" onClick={()=>setView('sessions')}><Settings size={18}/>場次管理</button><button className="secondary" onClick={()=>setView('roster')}><ClipboardList size={18}/>名單管理</button></div></div>{current&&<RoomStatusOverview sessionId={current.id} roomCount={current.roomCount}/>}<Checkin key={current?.id??'no-session'} current={current} participants={participants} onSuccess={onCheckedIn} setNotice={setNotice}/></section>
 }
 function SessionExportPanel({session,participants,setNotice}:{session:Session;participants:Participant[];setNotice:(message:string)=>void}){
   const[exporting,setExporting]=useState<'checkin'|'ultrasound'|null>(null);const report=buildCheckinReport(participants);const exportActive=useRef(true);
   useEffect(()=>{exportActive.current=true;return()=>{exportActive.current=false;};},[]);
-  const run=async(kind:'checkin'|'ultrasound')=>{setExporting(kind);try{const freshParticipants=await listParticipants(session.id);if(!exportActive.current)return;if(kind==='checkin'){downloadCheckinReport(session,freshParticipants);setNotice('今日報到狀況 Excel 已完成下載。');return;}const examinations=await listExaminations(freshParticipants.map(person=>person.id));if(!exportActive.current)return;if(!examinations.length){setNotice('此場次目前尚無超音波檢查紀錄。');return;}downloadUltrasoundReport(session,freshParticipants,examinations);const inProgress=examinations.filter(item=>item.status==='in_progress').length;setNotice(inProgress?`今日超音波狀況 Excel 已完成下載；目前仍有 ${inProgress} 人檢查中，完成統計僅計入已完成檢查。`:'今日超音波狀況 Excel 已完成下載。');}catch(error){if(exportActive.current)setNotice(`匯出失敗：${friendlyError(error)}`);}finally{if(exportActive.current)setExporting(null);}};
+  const run=async(kind:'checkin'|'ultrasound')=>{
+    setExporting(kind);
+    try{
+      const freshParticipants=await listParticipants(session.id);
+      if(!exportActive.current)return;
+      if(kind==='checkin'){
+        const {downloadCheckinReport}=await import('./features/export/sessionExport');
+        if(!exportActive.current)return;
+        downloadCheckinReport(session,freshParticipants);
+        setNotice('今日報到狀況 Excel 已完成下載。');return;
+      }
+      const examinations=await listExaminations(freshParticipants.map(person=>person.id));
+      if(!exportActive.current)return;
+      if(!examinations.length){setNotice('此場次目前尚無超音波檢查紀錄。');return;}
+      const {downloadUltrasoundReport}=await import('./features/export/sessionExport');
+      if(!exportActive.current)return;
+      downloadUltrasoundReport(session,freshParticipants,examinations);
+      const inProgress=examinations.filter(item=>item.status==='in_progress').length;
+      setNotice(inProgress?`今日超音波狀況 Excel 已完成下載；目前仍有 ${inProgress} 人檢查中，完成統計僅計入已完成檢查。`:'今日超音波狀況 Excel 已完成下載。');
+    }catch(error){if(exportActive.current)setNotice(`匯出失敗：${friendlyError(error)}`);}
+    finally{if(exportActive.current)setExporting(null);}
+  };
   return <div className="space-y-4"><dl className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-3"><Stat label="公司名稱" value={session.companyName}/><Stat label="健檢日期" value={session.sessionDate}/><Stat label="今日排程" value={`${participants.length} 人`}/><Stat label="已報到" value={`${report.checkedIn.length} 人`}/><Stat label="未報到" value={`${report.notCheckedIn.length} 人`}/><Stat label="已完成超音波" value={`${participants.filter(person=>person.status==='已完成').length} 人`}/><Stat label="超音波診間" value={`${getRoomCount(session.roomCount)}間`}/><Stat label="場次狀態" value={session.status}/></dl><div className="rounded-xl border border-teal-100 p-4"><h4 className="mb-3 font-black"><FileSpreadsheet className="mr-2 inline text-teal-700" size={20}/>資料匯出</h4><div className="grid gap-2"><button className="primary w-full disabled:opacity-50" disabled={exporting!==null} onClick={()=>void run('checkin')}><FileSpreadsheet size={18}/>{exporting==='checkin'?'正在整理 Excel……':'匯出今日報到狀況'}</button><button className="secondary w-full disabled:opacity-50" disabled={exporting!==null} onClick={()=>void run('ultrasound')}><FileSpreadsheet size={18}/>{exporting==='ultrasound'?'正在整理 Excel……':'匯出今日超音波狀況'}</button></div></div></div>;
 }
 function ManagementHeader({title,onBack}:{title:string;onBack:()=>void}){return <header className="mb-5 flex items-center gap-4 border-b border-slate-200 pb-4"><button className="secondary" onClick={onBack}><ArrowLeft size={19}/>返回報到站</button><div><h2 className="text-2xl font-black">{title}</h2><p className="text-sm text-slate-500">管理作業完成後，可返回現場工作畫面。</p></div></header>}

@@ -8,6 +8,9 @@ import {useRoomStates} from '../features/room/useRoomStates';
 import {getRoomIds} from '../features/room/status';
 import type {Examination,Participant,RoomState,Session} from '../types';
 
+type CloudPayload={eventType:string;new:Record<string,unknown>;old:Record<string,unknown>};
+const realtime=vi.hoisted(()=>({handlers:[] as Array<(payload:CloudPayload)=>void>}));
+vi.mock('../lib/supabase',()=>({requireSupabase:()=>({channel:()=>{const channel={on:(_event:string,_filter:unknown,handler:(payload:CloudPayload)=>void)=>{realtime.handlers.push(handler);return channel;},subscribe:()=>channel};return channel;},removeChannel:vi.fn()})}));
 vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn()}));
 vi.mock('../features/examination/service',async importOriginal=>({...await importOriginal<typeof import('../features/examination/service')>(),listExaminations:vi.fn(),enqueueAdditionalExamination:vi.fn()}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:vi.fn()}));
@@ -78,10 +81,15 @@ async function selectGroup(group:string){
   if(!button)throw new Error(`找不到分組：${group}`);
   await act(async()=>{button.click();});
 }
+async function emitExamination(participantId:string,id='exam-1',eventType='UPDATE'){
+  await act(async()=>{for(const handler of realtime.handlers)handler({eventType,new:eventType==='DELETE'?{}:{id,participant_id:participantId},old:eventType==='DELETE'?{id}:{} });});
+}
+async function flushRealtime(){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,125));});}
 
 describe('超音波控制台診間狀態',()=>{
   beforeEach(()=>{
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=true;
+    realtime.handlers=[];
     list.mockReset();
     list.mockResolvedValue([]);
     vi.mocked(callParticipant).mockReset();
@@ -302,13 +310,71 @@ describe('超音波控制台診間狀態',()=>{
     setRoomStatuses();
     list.mockResolvedValueOnce([examination({roomId:'診間 2',status:'completed',completedAt:'2026-10-07T00:03:00Z',actualItems:['腹部超音波'],itemCount:1})]);
     await render([person({status:'已完成'})]);
+    await emitExamination('person-1');await flushRealtime();
     expectRooms();
     expect(roomCell()).toBe('診間 2');
     expect(rowFor('王小明').cells[7].textContent).toBe('1 件');
     expect(changed).not.toHaveBeenCalled();
   });
 
-  it('叫號後較早的操作重新載入晚回覆時，不覆蓋同場次新名單的檢查中診間',async()=>{
+  it('participant陣列identity、排序與同ID狀態更新不會重新抓examinations，新增ID才會刷新',async()=>{
+    const first=person();const second=person({id:'person-2',name:'李小華'});
+    await render([first,second]);
+    expect(list).toHaveBeenCalledTimes(1);
+    await render([{...second,status:'已完成'},{...first,status:'已叫號'}]);
+    expect(list).toHaveBeenCalledTimes(1);
+    await render([{...first},{...second},person({id:'person-3'})]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenLastCalledWith(['person-1','person-2','person-3']);
+  });
+
+  it('exam Realtime僅接受目前場次participant，三個短時間事件只刷新一次',async()=>{
+    await render([person()]);list.mockClear();
+    await emitExamination('foreign-person','foreign-exam');await flushRealtime();
+    expect(list).not.toHaveBeenCalled();
+    await emitExamination('person-1');await emitExamination('person-1','exam-2');await emitExamination('person-1','exam-3');await flushRealtime();
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it('DELETE只有目前已載入exam PK會刷新，不受其他場次未知PK影響',async()=>{
+    list.mockResolvedValue([examination()]);await render([person()]);list.mockClear();
+    await emitExamination('', 'foreign-exam','DELETE');await flushRealtime();
+    expect(list).not.toHaveBeenCalled();
+    list.mockResolvedValue([]);await emitExamination('', 'exam-1','DELETE');await flushRealtime();
+    expect(list).toHaveBeenCalledTimes(1);expect(roomCell()).toBe('—');
+  });
+
+  it('初次讀取中的未知DELETE不增加查詢，延遲回覆也不會復活已刪除exam',async()=>{
+    let resolve!:(rounds:Examination[])=>void;list.mockImplementationOnce(()=>new Promise<Examination[]>(accept=>{resolve=accept;}));
+    await render([person()]);await emitExamination('', 'exam-1','DELETE');
+    await act(async()=>{resolve([examination()]);});await flushRealtime();
+    expect(list).toHaveBeenCalledTimes(1);expect(roomCell()).toBe('—');
+  });
+
+  it('叫號與等待狀態操作不重抓exam，追加檢查action與RT共享一次立即刷新',async()=>{
+    const completed=examination({status:'completed',actualItems:['腹部超音波'],itemCount:1});
+    const queued=examination({id:'round-2',roundNo:2,status:'waiting',selectedItems:['甲狀腺超音波'],roomId:null});
+    list.mockResolvedValue([completed]);
+    const patient=person({status:'等候中',plannedItems:['腹部超音波','甲狀腺超音波']});
+    await render([patient]);list.mockClear();
+    await click('叫號');
+    const select=container.querySelector<HTMLSelectElement>('[aria-label="王小明 等候狀態"]')!;
+    await act(async()=>{select.value='上廁所';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(list).not.toHaveBeenCalled();
+    await render([{...patient,status:'已完成'}]);await click('追加檢查');
+    list.mockResolvedValue([completed,queued]);
+    vi.mocked(enqueueAdditionalExamination).mockImplementationOnce(async()=>{for(const handler of realtime.handlers)handler({eventType:'INSERT',new:{id:'round-2',participant_id:'person-1'},old:{}});return queued;});
+    await click('加入等候');await flushRealtime();
+    expect(list).toHaveBeenCalledTimes(1);expect(changed).toHaveBeenCalledTimes(3);
+  });
+
+  it('四間房態或heartbeat重新render不會重抓exam，紅黃綠燈仍立即顯示',async()=>{
+    await render([person()]);list.mockClear();
+    for(const room of [1,2,3,4]){setRoomStatuses([], [room]);await render([{...person()}]);expect(indicator(room).getAttribute('aria-label')).toBe(`診間${room}：暫時離開`);}
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('examination較早的重新載入晚回覆時，dirty trailing重新取得最新診間而叫號不重抓',async()=>{
     let resolveAction!:(rounds:Examination[])=>void;
     list.mockResolvedValueOnce([examination({status:'waiting',roomId:null,startedAt:null})]);
     list.mockImplementationOnce(()=>new Promise<Examination[]>(resolve=>{resolveAction=resolve;}));
@@ -318,14 +384,16 @@ describe('超音波控制台診間狀態',()=>{
     expectRooms();
     const call=Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(element=>element.textContent==='叫號')!;
     await act(async()=>{call.click();});
+    expect(list).toHaveBeenCalledTimes(1);
+    await emitExamination('person-1');await flushRealtime();
     await until(()=>list.mock.calls.length===2);
     expect(callParticipant).toHaveBeenCalledWith('person-1');
     expect(changed).toHaveBeenCalledTimes(1);
     setRoomStatuses([3]);
     await render([person({status:'檢查中',updatedAt:'2026-10-07T00:03:00Z'})]);
-    expectRooms([3]);
-    expect(roomCell()).toBe('診間3');
+    await emitExamination('person-1');await flushRealtime();
     await act(async()=>{resolveAction([examination({roomId:'診間 1'})]);});
+    await until(()=>list.mock.calls.length===3);
     expectRooms([3]);
     expect(roomCell()).toBe('診間3');
     expect(list).toHaveBeenCalledTimes(3);

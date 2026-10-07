@@ -11,8 +11,9 @@ vi.mock('../features/room/claims',async importOriginal=>({
 }));
 
 import {useRoomClaims} from '../features/room/useRoomClaims';
+import {getDeviceIdentity} from '../features/room/device';
 
-type Channel={change?:()=>void;status?:(status:string)=>void;filters:Record<string,string>[];on:ReturnType<typeof vi.fn>;subscribe:ReturnType<typeof vi.fn>};
+type Channel={change?:(payload?:unknown)=>void;status?:(status:string)=>void;filters:Record<string,string>[];on:ReturnType<typeof vi.fn>;subscribe:ReturnType<typeof vi.fn>};
 const actEnvironment=globalThis as typeof globalThis&{IS_REACT_ACT_ENVIRONMENT:boolean};
 let root:Root;
 let container:HTMLDivElement;
@@ -44,7 +45,7 @@ describe('診間認領同步、租約與切換',()=>{
     channels=[];
     remote.channel.mockImplementation(()=>{
       const channel:Channel={filters:[],on:vi.fn(),subscribe:vi.fn()};
-      channel.on.mockImplementation((_event:string,filter:Record<string,string>,change:()=>void)=>{channel.filters.push(filter);channel.change=change;return channel;});
+      channel.on.mockImplementation((_event:string,filter:Record<string,string>,change:(payload?:unknown)=>void)=>{channel.filters.push(filter);channel.change=change;return channel;});
       channel.subscribe.mockImplementation((status:(status:string)=>void)=>{channel.status=status;return channel;});
       channels.push(channel);return channel;
     });
@@ -150,11 +151,13 @@ describe('診間認領同步、租約與切換',()=>{
   it('focus、online 與同場次 Realtime 会重新確認，切到背景不釋放',async()=>{
     await render();const reads=remote.list.mock.calls.length;
     await event(()=>window.dispatchEvent(new Event('focus')));
+    await advance(100);
     expect(remote.list.mock.calls.length).toBeGreaterThan(reads);
     await event(()=>window.dispatchEvent(new Event('online')));
+    await advance(100);
     expect(remote.heartbeat).toHaveBeenCalledWith('session-1','診間 1');
     const refreshed=remote.list.mock.calls.length;
-    await event(()=>channels[0].change?.());expect(remote.list.mock.calls.length).toBeGreaterThan(refreshed);
+    await event(()=>channels[0].change?.());await advance(100);expect(remote.list.mock.calls.length).toBeGreaterThan(refreshed);
     const releases=remote.release.mock.calls.length;
     Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
     await event(()=>document.dispatchEvent(new Event('visibilitychange')));
@@ -261,6 +264,127 @@ describe('診間認領同步、租約與切換',()=>{
     await advance(30_000);expect(latest.isOwned).toBe(false);expect(latest.claimConfirmed).toBe(false);
     await act(async()=>{expect(await latest.selectRoom('診間 1')).toBe(true);});
     expect(latest.isOwned).toBe(true);expect(latest.claimConfirmed).toBe(true);
+  });
+
+  it('初次開啟只讀一筆claim清單，首次認領與count effect不得重複讀取',async()=>{
+    await render();expect(remote.list).toHaveBeenCalledTimes(1);expect(remote.claim).toHaveBeenCalledTimes(1);expect(latest.isOwned).toBe(true);
+  });
+
+  it('focus、visible、online與SUBSCRIBED在同一burst只刷新一次並續租一次',async()=>{
+    await render();
+    await event(()=>{
+      window.dispatchEvent(new Event('focus'));document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('online'));channels[0].status?.('SUBSCRIBED');
+    });
+    expect(remote.list).toHaveBeenCalledTimes(1);expect(remote.heartbeat).not.toHaveBeenCalled();
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(2);expect(remote.heartbeat).toHaveBeenCalledTimes(1);expect(latest.isOwned).toBe(true);
+  });
+
+  it('本人heartbeat Realtime echo以RPC回應續租，不額外讀取其他診間claim清單',async()=>{
+    await render();const {deviceId}=getDeviceIdentity();
+    await event(()=>{
+      for(let index=0;index<4;index++)channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-1',room_id:'診間 1',claimed_by_device_id:deviceId,claimed_at:latest.claims.find(claim=>claim.isMine)?.claimedAt,claim_expires_at:'2026-10-07T02:03:30.000Z'}});
+    });
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(1);expect(latest.isOwned).toBe(true);
+    await advance(29_900);expect(remote.heartbeat).toHaveBeenCalledTimes(1);expect(remote.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('房態變化但claim欄位不變不重新抓租約，其他場次及無效房號也不觸發',async()=>{
+    await render();const owner={claimed_by_device_id:'other-device',claimed_by_user_id:'other-staff',claimed_at:'2026-10-07T02:00:00Z',claim_expires_at:'2026-10-07T02:03:00Z'};
+    await event(()=>{
+      channels[0].change?.({eventType:'UPDATE',old:{session_id:'session-1',room_id:'診間 2',status:'idle',...owner},new:{session_id:'session-1',room_id:'診間 2',status:'away',...owner}});
+      channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-2',room_id:'診間 1',claimed_by_device_id:'other-device'}});
+      channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-1',room_id:'診間 8',claimed_by_device_id:'other-device'}});
+    });
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('同一交易多個其他診間認領事件聚合成一次讀取且100ms內反映占用',async()=>{
+    await render();snapshot[1]=leased('session-1','診間 2',false);
+    await event(()=>{
+      for(let index=0;index<3;index++)channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-1',room_id:'診間 2',claimed_by_device_id:'other-device',claimed_at:'2026-10-07T02:00:00Z',claim_expires_at:'2026-10-07T02:03:00Z'}});
+    });
+    expect(remote.list).toHaveBeenCalledTimes(1);await advance(100);expect(remote.list).toHaveBeenCalledTimes(2);
+    expect(latest.claims.find(claim=>claim.roomId==='診間 2')?.isClaimed).toBe(true);
+  });
+
+  it('同場次已有list讀取时重複refresh共用promise，租約變更會追加一次最新讀取不被skip',async()=>{
+    await render();const before=remote.list.mock.calls.length;const pending=deferred<RoomClaim[]>();const trailing=deferred<RoomClaim[]>();
+    remote.list.mockReturnValueOnce(pending.promise).mockReturnValueOnce(trailing.promise);
+    let first!:Promise<void>;let second!:Promise<void>;
+    await event(()=>{first=latest.refresh();second=latest.refresh();});expect(first).toBe(second);expect(remote.list).toHaveBeenCalledTimes(before+1);
+    await event(()=>{for(let index=0;index<4;index++)channels[0].change?.();});
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(before+1);
+    const old=snapshot.map(claim=>({...claim}));
+    await event(()=>pending.resolve(old));expect(remote.list).toHaveBeenCalledTimes(before+2);expect(latest.isOwned).toBe(true);
+    snapshot[0]=leased('session-1','診間 1',false);
+    await act(async()=>{trailing.resolve(snapshot);await first;});
+    expect(latest.isOwned).toBe(false);expect(latest.claimConfirmed).toBe(false);expect(remote.list).toHaveBeenCalledTimes(before+2);
+  });
+
+  it('initial list尚未完成時重複focus與public refresh共用初始工作，Realtime更新只追加一讀再認領',async()=>{
+    const pending=deferred<RoomClaim[]>();remote.list.mockReturnValueOnce(pending.promise);
+    await render();
+    await event(()=>{void latest.refresh();window.dispatchEvent(new Event('focus'));channels[0].status?.('SUBSCRIBED');});
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(1);
+    await event(()=>{for(let index=0;index<3;index++)channels[0].change?.();});
+    await advance(100);snapshot[0]=leased('session-1','診間 1',false);
+    await event(()=>pending.resolve([empty()]));
+    expect(remote.list).toHaveBeenCalledTimes(2);expect(remote.claim).not.toHaveBeenCalled();expect(latest.isOwned).toBe(false);expect(latest.busy).toBe(false);
+  });
+
+  it('聚合timer尚未送出即場次切換或卸載，不會送舊scope查詢',async()=>{
+    await render();await event(()=>channels[0].change?.());
+    snapshot=[empty('session-2','診間 1')];await render('session-2',1);await advance(100);
+    expect(remote.list.mock.calls.map(([id])=>id)).toEqual(['session-1','session-2']);expect(latest.roomId).toBe('診間 1');
+    await event(()=>channels[1].change?.());await event(()=>root.unmount());root=createRoot(container);await advance(100);
+    expect(remote.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('續租RPC仍在排隊或等待回應時重複focus事件共用該RPC，不堆疊多筆heartbeat',async()=>{
+    await render();const pending=deferred<RoomClaim>();remote.heartbeat.mockReturnValueOnce(pending.promise);
+    await event(()=>window.dispatchEvent(new Event('focus')));await advance(100);
+    expect(remote.heartbeat).toHaveBeenCalledTimes(1);
+    await event(()=>{
+      window.dispatchEvent(new Event('focus'));window.dispatchEvent(new Event('online'));
+      document.dispatchEvent(new Event('visibilitychange'));channels[0].status?.('SUBSCRIBED');
+    });
+    await advance(100);expect(remote.heartbeat).toHaveBeenCalledTimes(1);
+    await event(()=>pending.resolve(own('session-1','診間 1')));
+    expect(remote.heartbeat).toHaveBeenCalledTimes(1);expect(latest.isOwned).toBe(true);
+  });
+
+  it('本人初始claim回應與Realtime echo不重複讀清單，另一設備的新認領仍會立即排刷新',async()=>{
+    const {deviceId}=getDeviceIdentity();
+    remote.claim.mockImplementationOnce(async(sessionId:string,roomId:string)=>{
+      const result=own(sessionId,roomId);
+      channels[0].change?.({eventType:'UPDATE',new:{session_id:sessionId,room_id:roomId,claimed_by_device_id:deviceId,claimed_at:result.claimedAt,claim_expires_at:result.claimExpiresAt}});
+      return result;
+    });
+    await render();await advance(100);expect(remote.list).toHaveBeenCalledTimes(1);expect(latest.isOwned).toBe(true);
+    snapshot[0]=leased('session-1','診間 1',false);
+    await event(()=>channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-1',room_id:'診間 1',claimed_by_device_id:'other-device',claimed_at:snapshot[0].claimedAt,claim_expires_at:snapshot[0].claimExpiresAt}}));
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(2);expect(latest.isOwned).toBe(false);
+  });
+
+  it('本人lease期限縮短或失效不能當成正常heartbeat echo忽略，必須重讀確認',async()=>{
+    await render();const {deviceId}=getDeviceIdentity();const acquired=latest.claims.find(claim=>claim.isMine)?.claimedAt;
+    snapshot[0]={...empty(),claimedAt:acquired??null};
+    await event(()=>channels[0].change?.({eventType:'UPDATE',new:{session_id:'session-1',room_id:'診間 1',claimed_by_device_id:deviceId,claimed_at:acquired,claim_expires_at:'2026-10-07T02:00:00.000Z'}}));
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(2);expect(latest.isOwned).toBe(false);
+  });
+
+  it('DELETE依old複合主鍵排除其他場次與無效房號，本場次及不完整payload仍安全重讀',async()=>{
+    await render();
+    await event(()=>{
+      channels[0].change?.({eventType:'DELETE',new:{},old:{session_id:'other-session',room_id:'診間 1'}});
+      channels[0].change?.({eventType:'DELETE',new:{},old:{session_id:'session-1',room_id:'診間 8'}});
+    });
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(1);
+    await event(()=>channels[0].change?.({eventType:'DELETE',new:{},old:{session_id:'session-1',room_id:'診間 2'}}));
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(2);
+    await event(()=>channels[0].change?.({eventType:'DELETE',new:{},old:{}}));
+    await advance(100);expect(remote.list).toHaveBeenCalledTimes(3);
   });
 
 });

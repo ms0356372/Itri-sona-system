@@ -5,6 +5,9 @@ import {UltrasoundRoom} from '../features/room/UltrasoundRoom';
 import type {Examination,HistoricalRecord,Participant,RoomState,Session} from '../types';
 import type {RoomClaimState} from '../features/room/useRoomClaims';
 
+type CloudPayload={eventType:string;new:Record<string,unknown>;old:Record<string,unknown>};
+const realtime=vi.hoisted(()=>({handlers:[] as Array<(payload:CloudPayload)=>void>}));
+vi.mock('../lib/supabase',()=>({requireSupabase:()=>({channel:()=>{const channel={on:(_event:string,_filter:unknown,handler:(payload:CloudPayload)=>void)=>{realtime.handlers.push(handler);return channel;},subscribe:()=>channel};return channel;},removeChannel:vi.fn()})}));
 type StoredRoom=RoomState;
 const remote=vi.hoisted(()=>({
   rooms:[] as StoredRoom[],roomCount:undefined as number|undefined,loading:false,error:'',refresh:vi.fn(),acceptRoom:vi.fn(),setAway:vi.fn(),
@@ -55,6 +58,10 @@ function queryInput(){
   return element;
 }
 async function click(element:HTMLElement){await act(async()=>{element.click();});}
+async function emitExamination(participantId:string,id='exam-1',eventType='UPDATE'){
+  await act(async()=>{for(const handler of realtime.handlers)handler({eventType,new:eventType==='DELETE'?{}:{id,participant_id:participantId},old:eventType==='DELETE'?{id}:{} });});
+}
+async function flushRealtime(){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,125));});}
 function clickHandler(element:HTMLElement){
   const property=Object.keys(element).find(key=>key.startsWith('__reactProps$'));
   if(!property)throw new Error('找不到已註冊的操作。');
@@ -92,6 +99,7 @@ function updateRoom(roomId:string,status:StoredRoom['status']){
 describe('超音波診間暫時離開',()=>{
   beforeEach(()=>{
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=true;
+    realtime.handlers=[];
     localStorage.clear();
     vi.stubGlobal('matchMedia',vi.fn(()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()})));
     remote.rooms=[1,2,3,4].map(value=>roomState(`診間 ${value}`));
@@ -238,6 +246,82 @@ describe('超音波診間暫時離開',()=>{
     await click(button('展示'));
     expect(remote.claimInputs.mock.calls.every(([sessionId])=>sessionId===session.id)).toBe(true);
     expect(remote.claimRelease).not.toHaveBeenCalled();
+  });
+
+  it('初次還原workspace只讀一次診間檢查，不因載入完成再做相同query',async()=>{
+    await render([]);await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);expect(remote.examinations).not.toHaveBeenCalled();
+  });
+
+  it('房內進行中檢查先於participants抵達時，名單到齊後補上同病人的本機歷年資料',async()=>{
+    remote.roomExamination.mockResolvedValue(examination());
+    await render([]);
+    expect(remote.historyByEmployee).not.toHaveBeenCalled();
+    await render([participant({status:'檢查中'})]);await flushRealtime();
+    expect(remote.historyByEmployee).toHaveBeenCalledTimes(1);expect(remote.historyByEmployee).toHaveBeenCalledWith('00125');
+    await click(button('腹部超音波｜最近三次'));
+    expect(container.querySelector('.room-history')?.textContent).toContain('既往腹部結果');
+    expect(button('完成檢查').disabled).toBe(false);
+  });
+
+  it('同ID新participant陣列、其他人狀態及四次heartbeat不重抓目前診間examinations',async()=>{
+    await loadPerson();remote.roomExamination.mockClear();remote.examinations.mockClear();
+    for(let index=0;index<4;index++){
+      remote.rooms=remote.rooms.map(value=>({...value}));
+      await render([{...participant()},participant({id:'other-person',name:'其他人',status:index%2?'已完成':'未報到'})]);
+    }
+    await flushRealtime();
+    expect(remote.roomExamination).not.toHaveBeenCalled();expect(remote.examinations).not.toHaveBeenCalled();expectPatientAndHistory();
+  });
+
+  it('examination Realtime只讀選定受檢者，同場次其他人和其他場次都不重抓',async()=>{
+    await loadPerson();remote.roomExamination.mockClear();remote.examinations.mockClear();
+    await emitExamination('foreign-person','foreign-exam');await emitExamination('other-person','other-exam');await flushRealtime();
+    expect(remote.roomExamination).not.toHaveBeenCalled();expect(remote.examinations).not.toHaveBeenCalled();
+    const waiting=examination({id:'round-2',roundNo:2,status:'waiting',roomId:null,startedAt:null,selectedItems:['腹部超音波']});
+    remote.examinations.mockResolvedValue([waiting]);
+    await emitExamination('person-1','round-2','INSERT');await emitExamination('person-1','round-2');await emitExamination('person-1','round-2');await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);expect(remote.examinations).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.room-patient-details')?.textContent).toContain('等候追加・第 2 輪');
+    expect(remote.start).not.toHaveBeenCalled();
+  });
+
+  it('已載入exam的DELETE以PK刷新，其他場次未知PK不觸發讀取',async()=>{
+    remote.examination.mockResolvedValue(examination());await render();await input(queryInput(),'A123456789');
+    remote.roomExamination.mockClear();remote.examinations.mockClear();
+    await emitExamination('','foreign-exam','DELETE');await flushRealtime();
+    expect(remote.roomExamination).not.toHaveBeenCalled();
+    await emitExamination('','exam-1','DELETE');await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);expect(remote.examinations).toHaveBeenCalledTimes(1);
+    expect(button('開始檢查').disabled).toBe(false);
+    expect(Array.from(container.querySelectorAll('button')).some(value=>value.textContent==='完成檢查')).toBe(false);
+  });
+
+  it('同scope讀取中再有examination變更不開平行query，trailing read仍還原最終完成狀態',async()=>{
+    await loadPerson();remote.roomExamination.mockClear();remote.examinations.mockClear();
+    let resolve!:(value:Examination|null)=>void;remote.roomExamination.mockImplementationOnce(()=>new Promise<Examination|null>(accept=>{resolve=accept;}));
+    await emitExamination('person-1');await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);
+    await emitExamination('person-1');await flushRealtime();expect(remote.roomExamination).toHaveBeenCalledTimes(1);
+    const completed=examination({status:'completed',completedAt:'2026-10-07T00:03:05Z',actualItems:['腹部超音波'],durationSeconds:65,itemCount:1});remote.examinations.mockResolvedValue([completed]);
+    await act(async()=>{resolve(examination());});await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(2);expect(remote.examinations).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('檢查已完成');expect(container.textContent).toContain('00:01:05');
+    expect(remote.start).not.toHaveBeenCalled();expect(remote.complete).not.toHaveBeenCalled();
+  });
+
+  it('開始與完成後manual狀態更新及Realtime各合成一次examination刷新',async()=>{
+    await loadPerson();remote.roomExamination.mockClear();remote.examinations.mockClear();
+    const running=examination({selectedItems:['腹部超音波']});
+    remote.start.mockImplementationOnce(async()=>{remote.roomExamination.mockResolvedValue(running);updateRoom('診間 1','in_progress');for(const handler of realtime.handlers)handler({eventType:'INSERT',new:{id:'exam-1',participant_id:'person-1'},old:{}});return running;});
+    await click(button('開始檢查'));await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);expect(remote.examinations).not.toHaveBeenCalled();
+    remote.roomExamination.mockClear();remote.examinations.mockClear();
+    const completed=examination({status:'completed',selectedItems:['腹部超音波'],actualItems:['腹部超音波'],completedAt:'2026-10-07T00:03:05Z',durationSeconds:65,itemCount:1});
+    remote.complete.mockImplementationOnce(async()=>{remote.roomExamination.mockResolvedValue(null);remote.examinations.mockResolvedValue([completed]);updateRoom('診間 1','idle');for(const handler of realtime.handlers)handler({eventType:'UPDATE',new:{id:'exam-1',participant_id:'person-1'},old:{}});return completed;});
+    await click(button('完成檢查'));await click(button('確認完成並同步雲端'));await flushRealtime();
+    expect(remote.roomExamination).toHaveBeenCalledTimes(1);expect(remote.examinations).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('檢查已完成');expect(changed).toHaveBeenCalledTimes(2);
   });
 
   it.each([3,8])('設定%s間時選擇器只提供目前有效診間，保留雲端away狀態',async roomCount=>{
@@ -578,10 +662,12 @@ describe('超音波診間暫時離開',()=>{
     const running=examination({selectedItems:['腹部超音波']});
     remote.roomExamination.mockResolvedValue(running);remote.examinations.mockResolvedValue([running]);
     updateRoom('診間 1','in_progress');await render([participant({status:'檢查中',updatedAt:'2026-10-07T00:02:00Z'})]);
+    await flushRealtime();
     expect(button('開始檢查').disabled).toBe(true);expect(button('完成檢查').disabled).toBe(false);expectPatientAndHistory();
     const completed=examination({selectedItems:['腹部超音波'],status:'completed',completedAt:'2026-10-07T00:03:05Z',durationSeconds:65,actualItems:['腹部超音波'],itemCount:1});
     remote.roomExamination.mockResolvedValue(null);remote.examinations.mockResolvedValue([completed]);
     updateRoom('診間 1','idle');await render([participant({status:'已完成',updatedAt:'2026-10-07T00:03:05Z'})]);
+    await flushRealtime();
     expect(container.textContent).toContain('檢查已完成');expect(container.textContent).toContain('00:01:05');expectPatientAndHistory();
     expect(remote.start).not.toHaveBeenCalled();expect(remote.complete).not.toHaveBeenCalled();expect(changed).not.toHaveBeenCalled();
   });

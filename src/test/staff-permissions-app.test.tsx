@@ -15,7 +15,7 @@ const remote=vi.hoisted(()=>({
   getPermissions:vi.fn(),removeChannel:vi.fn(),
   listSessions:vi.fn(),listParticipants:vi.fn(),unsubscribeSessions:vi.fn(),unsubscribeParticipants:vi.fn(),
   createSession:vi.fn(),listExaminations:vi.fn(),downloadCheckinReport:vi.fn(),downloadUltrasoundReport:vi.fn(),
-  subscribeSessions:vi.fn(),subscribeSession:vi.fn(),
+  subscribeSessions:vi.fn(),subscribeParticipants:vi.fn(),
   checkin:vi.fn(),console:vi.fn(),room:vi.fn(),
   claims:vi.fn(),releaseClaim:vi.fn(),
 }));
@@ -45,7 +45,7 @@ vi.mock('../features/auth/permissions',async importOriginal=>({
 vi.mock('../features/auth/service',()=>({signIn:vi.fn(),signOut:remote.signOut}));
 vi.mock('../features/sessions/service',()=>({listSessions:remote.listSessions,createSession:remote.createSession,updateSessionRoomCount:vi.fn()}));
 vi.mock('../features/schedule/service',()=>({listParticipants:remote.listParticipants}));
-vi.mock('../features/sync/realtime',()=>({subscribeSession:remote.subscribeSession,subscribeSessions:remote.subscribeSessions}));
+vi.mock('../features/sync/realtime',()=>({subscribeParticipants:remote.subscribeParticipants,subscribeSessions:remote.subscribeSessions}));
 vi.mock('../features/roster/RosterManager',()=>({RosterManager:()=>null}));
 vi.mock('../features/roster/db',()=>({clearPreparedSchedule:vi.fn()}));
 vi.mock('../features/checkin/Checkin',()=>({Checkin:remote.checkin}));
@@ -99,8 +99,10 @@ async function input(element:HTMLInputElement,value:string){
   await act(async()=>{setValue.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});
 }
 async function emitAuth(id:string|null){await act(async()=>{remote.authListener?.(id?'SIGNED_IN':'SIGNED_OUT',id?auth(id):null);});}
+async function settleRefresh(){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,110));});}
 async function emitPermissions(id='staff-1'){
   await act(async()=>{for(const subscription of remote.channels)if(subscription.filter===`user_id=eq.${id}`)subscription.listener();});
+  await settleRefresh();
 }
 function deferred<T>(){
   let resolve!:(value:T)=>void;let reject!:(reason:unknown)=>void;
@@ -109,7 +111,7 @@ function deferred<T>(){
 }
 function noWorkData(){
   expect(remote.listSessions).not.toHaveBeenCalled();expect(remote.listParticipants).not.toHaveBeenCalled();
-  expect(remote.subscribeSessions).not.toHaveBeenCalled();expect(remote.subscribeSession).not.toHaveBeenCalled();
+  expect(remote.subscribeSessions).not.toHaveBeenCalled();expect(remote.subscribeParticipants).not.toHaveBeenCalled();
   expect(remote.checkin).not.toHaveBeenCalled();expect(remote.console).not.toHaveBeenCalled();expect(remote.room).not.toHaveBeenCalled();
 }
 
@@ -132,7 +134,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     remote.subscribeSessions.mockImplementation((listener:()=>void)=>{
       remote.sessionListeners.add(listener);return()=>{remote.sessionListeners.delete(listener);remote.unsubscribeSessions();};
     });
-    remote.subscribeSession.mockImplementation((_id:string,listener:()=>void)=>{
+    remote.subscribeParticipants.mockImplementation((_id:string,listener:()=>void)=>{
       remote.participantListeners.add(listener);return()=>{remote.participantListeners.delete(listener);remote.unsubscribeParticipants();};
     });
     remote.checkin.mockImplementation((props:WorkProps)=>work('registration',props));
@@ -233,6 +235,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     const container=await mount();expect(container.textContent).toContain('今日受檢者');
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await settleRefresh();
     expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
     expect(remote.sessionListeners.size).toBe(0);expect(remote.participantListeners.size).toBe(0);
     await act(async()=>{pending.reject(new Error('network down'));});
@@ -245,6 +248,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     const calls=remote.claims.mock.calls.length;
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await settleRefresh();
     expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
     expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     await act(async()=>{pending.resolve(staff());});
@@ -258,6 +262,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     await act(async()=>{window.dispatchEvent(new Event('offline'));});
     expect(activePage(container)).toBeNull();expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     await act(async()=>{for(const channel of remote.channels)channel.status('SUBSCRIBED');});
+    await settleRefresh();
     expect(activePage(container)).toBe('room');expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     expect(remote.releaseClaim).not.toHaveBeenCalled();
   });
@@ -268,6 +273,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     localStorage.setItem('itri-current-session','session-b');
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await settleRefresh();
     expect(activePage(container)).toBeNull();expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     await act(async()=>{pending.resolve(staff());});
     expect(container.querySelector('[data-session-id]')?.getAttribute('data-session-id')).toBe('session-a');
@@ -315,6 +321,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
   it('tab focus 重讀權限，管理員停用後不再保留先前工作畫面',async()=>{
     const container=await mount();remote.permissions.set('staff-1',staff({isActive:false}));
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await settleRefresh();
     expect(remote.getPermissions).toHaveBeenCalledTimes(2);expect(container.textContent).toContain('此帳號目前已停用');
     expect(navigation(container)).toEqual([]);expect(activePage(container)).toBeNull();
     expect(remote.sessionListeners.size).toBe(0);expect(remote.participantListeners.size).toBe(0);
@@ -336,13 +343,14 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     remote.permissions.set('staff-1',staff({isActive:false}));await emitPermissions();
     await act(async()=>{pending.resolve([session({companyName:'禁止顯示的舊場次'})]);});
     expect(container.textContent).toContain('此帳號目前已停用');expect(container.textContent).not.toContain('禁止顯示的舊場次');
-    expect(remote.listParticipants).not.toHaveBeenCalled();expect(remote.subscribeSession).not.toHaveBeenCalled();
+    expect(remote.listParticipants).not.toHaveBeenCalled();expect(remote.subscribeParticipants).not.toHaveBeenCalled();
   });
 
   it('撤權後再次授權會重讀資料，撤權前的延遲名單不能覆寫重新載入的名單',async()=>{
     const container=await mount();const oldRead=deferred<Participant[]>();
     remote.listParticipants.mockReturnValueOnce(oldRead.promise);
     await act(async()=>{for(const listener of remote.participantListeners)listener();});
+    await settleRefresh();
     remote.permissions.set('staff-1',staff({canRegistration:false,canConsole:false,canRoom:false}));await emitPermissions();
     expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
     remote.listParticipants.mockResolvedValue([participant('重新授權後的名單')]);
@@ -390,7 +398,7 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     const container=await mount();await emitAuth(null);
     await act(async()=>{pending.resolve([session()]);});
     expect(container.textContent).toContain('工作人員登入');expect(activePage(container)).toBeNull();
-    expect(remote.listParticipants).not.toHaveBeenCalled();expect(remote.subscribeSession).not.toHaveBeenCalled();expect(remote.channels.size).toBe(0);
+    expect(remote.listParticipants).not.toHaveBeenCalled();expect(remote.subscribeParticipants).not.toHaveBeenCalled();expect(remote.channels.size).toBe(0);
   });
 
   it.each(['console','none'])('報到匯出名單仍讀取中時撤銷 registration → %s，不下載延遲回覆的資料',async target=>{

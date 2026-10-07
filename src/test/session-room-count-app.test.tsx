@@ -8,7 +8,7 @@ const remote=vi.hoisted(()=>({
   sessions:[] as Session[],listeners:new Set<()=>void>(),
   getSession:vi.fn(),onAuthStateChange:vi.fn(),unsubscribeAuth:vi.fn(),
   listSessions:vi.fn(),createSession:vi.fn(),updateSessionRoomCount:vi.fn(),listParticipants:vi.fn(),
-  subscribeSession:vi.fn(),subscribeSessions:vi.fn(),unsubscribeSessions:vi.fn(),
+  subscribeParticipants:vi.fn(),subscribeSessions:vi.fn(),unsubscribeSessions:vi.fn(),
 }));
 vi.mock('../lib/supabase',()=>{
   const client={
@@ -25,7 +25,7 @@ vi.mock('../features/auth/permissions',async importOriginal=>({
 }));
 vi.mock('../features/sessions/service',()=>({listSessions:remote.listSessions,createSession:remote.createSession,updateSessionRoomCount:remote.updateSessionRoomCount}));
 vi.mock('../features/schedule/service',()=>({listParticipants:remote.listParticipants}));
-vi.mock('../features/sync/realtime',()=>({subscribeSession:remote.subscribeSession,subscribeSessions:remote.subscribeSessions}));
+vi.mock('../features/sync/realtime',()=>({subscribeParticipants:remote.subscribeParticipants,subscribeSessions:remote.subscribeSessions}));
 vi.mock('../features/roster/RosterManager',()=>({RosterManager:()=>null}));
 vi.mock('../features/roster/db',()=>({clearPreparedSchedule:vi.fn()}));
 vi.mock('../features/checkin/Checkin',()=>({Checkin:({current,participants}:{current:Session|null;participants:Participant[]})=><div data-checkin-session={current?.id??''} data-participant-count={participants.length}>{participants.map(person=><span key={person.id} data-participant-session={person.sessionId}>{person.name}</span>)}</div>}));
@@ -71,7 +71,8 @@ async function select(container:HTMLElement,id:string){
   await act(async()=>{const element=selection(container);element.value=id;element.dispatchEvent(new Event('change',{bubbles:true}));});
 }
 async function manage(container:HTMLElement){await click(container,'場次管理');}
-async function broadcast(){await act(async()=>{for(const listener of remote.listeners)listener();});}
+async function settleRefresh(){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,110));});}
+async function broadcast(){await act(async()=>{for(const listener of remote.listeners)listener();});await settleRefresh();}
 function currentCount(container:HTMLElement){return container.querySelector('[data-current-room-count]')?.getAttribute('data-current-room-count');}
 
 describe('App 場次診間數量建立及跨裝置同步',()=>{
@@ -83,7 +84,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     remote.onAuthStateChange.mockReturnValue({data:{subscription:{unsubscribe:remote.unsubscribeAuth}}});
     remote.listSessions.mockImplementation(async()=>remote.sessions.map(value=>({...value})));
     remote.listParticipants.mockResolvedValue([]);
-    remote.subscribeSession.mockReturnValue(()=>undefined);
+    remote.subscribeParticipants.mockReturnValue(()=>undefined);
     remote.subscribeSessions.mockImplementation((listener:()=>void)=>{
       remote.listeners.add(listener);
       return()=>{remote.listeners.delete(listener);remote.unsubscribeSessions();};
@@ -168,7 +169,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     expect(currentCount(first)).toBe('2');expect(currentCount(second)).toBe('2');
   });
 
-  it('較早 Realtime 場次查詢延遲回覆時，不覆寫較新事件已載入的診間數量',async()=>{
+  it('Realtime 在場次查詢中到達時不並行重讀，完成後追讀最新診間數量',async()=>{
     const container=await mount();expect(currentCount(container)).toBe('3');
     let resolveEarlier!:(values:Session[])=>void;
     const earlierSnapshot=remote.sessions.map(value=>({...value}));
@@ -177,7 +178,8 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     expect(remote.listSessions).toHaveBeenCalledTimes(2);
     remote.sessions[0].roomCount=6;
     await broadcast();
-    expect(currentCount(container)).toBe('6');
+    expect(remote.listSessions).toHaveBeenCalledTimes(2);
+    expect(currentCount(container)).toBe('3');
     await act(async()=>{resolveEarlier(earlierSnapshot);});
     expect(currentCount(container)).toBe('6');
     await manage(container);
@@ -243,6 +245,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     expect(remote.updateSessionRoomCount).not.toHaveBeenCalled();
     remote.sessions[0].roomCount=3;
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await settleRefresh();
     expect(currentCount(container)).toBe('3');await manage(container);
     expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：3間');
     expect(container.querySelector<HTMLFormElement>('form')?.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true);
