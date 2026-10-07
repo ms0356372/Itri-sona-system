@@ -1,4 +1,13 @@
 export type GroupCode='A'|'B'|'C'|'D'|'E'|'F'|'G';
+export interface StaffPermissions {
+  userId:string;
+  loginEmail:string|null;
+  displayName:string;
+  canRegistration:boolean;
+  canConsole:boolean;
+  canRoom:boolean;
+  isActive:boolean;
+}
 export type WorkStatus='未報到'|'等候中'|'已叫號'|'上廁所'|'心電圖'|'先做其他'|'檢查中'|'已完成';
 export interface Session {id:string;sessionDate:string;companyName:string;status:'active'|'closing'|'closed';roomCount?:number|null}
 export interface Participant {id:string;sessionId:string;sequence:number;employeeNo:string;name:string;gender:string;slot:string;groupCode:GroupCode;plannedItems:string[];checkinNo:string|null;status:WorkStatus;checkedInAt:string|null;calledAt:string|null;note:string;updatedAt:string}

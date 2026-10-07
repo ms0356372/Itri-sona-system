@@ -3,7 +3,7 @@ import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {UltrasoundConsole} from '../features/console/Console';
 import {callParticipant,updateWaitingStatus} from '../features/console/service';
-import {listExaminations} from '../features/examination/service';
+import {enqueueAdditionalExamination,listExaminations} from '../features/examination/service';
 import {useRoomStates} from '../features/room/useRoomStates';
 import {getRoomIds} from '../features/room/status';
 import type {Examination,Participant,RoomState,Session} from '../types';
@@ -34,8 +34,16 @@ async function until(condition:()=>boolean){
   }
   throw new Error('診間狀態未在預期時間更新。');
 }
-async function render(participants:Participant[]=[],current:Session=session){
-  await act(async()=>{root.render(<UltrasoundConsole current={current} participants={participants} onChanged={changed} onError={errors}/>);});
+async function render(participants:Participant[]=[],current:Session|null=session,canRoom=true){
+  await act(async()=>{root.render(<UltrasoundConsole current={current} participants={participants} onChanged={changed} onError={errors} canRoom={canRoom}/>);});
+}
+function button(label:string){return Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(element=>element.textContent===label);}
+async function click(label:string){const element=button(label);if(!element)throw new Error(`找不到按鈕：${label}`);await act(async()=>{element.click();});}
+// A retained React handler models a stale event queued before an account's permission was revoked.
+function clickHandler(element:HTMLElement){
+  const property=Object.keys(element).find(key=>key.startsWith('__reactProps$'));
+  if(!property)throw new Error('找不到已註冊的操作。');
+  return (element as unknown as Record<string,{onClick:()=>void}>)[property].onClick;
 }
 function roomGroup(){
   const element=container.querySelector<HTMLElement>('[role="group"][aria-label="診間狀態"]');
@@ -78,6 +86,8 @@ describe('超音波控制台診間狀態',()=>{
     list.mockResolvedValue([]);
     vi.mocked(callParticipant).mockReset();
     vi.mocked(updateWaitingStatus).mockReset();
+    vi.mocked(enqueueAdditionalExamination).mockReset();
+    vi.mocked(enqueueAdditionalExamination).mockResolvedValue(examination({status:'waiting'}));
     changed=vi.fn(async()=>{});
     errors=vi.fn();
     setRoomStatuses();
@@ -99,6 +109,66 @@ describe('超音波控制台診間狀態',()=>{
     expect(list).toHaveBeenCalledWith([]);
     expect(vi.mocked(callParticipant)).not.toHaveBeenCalled();
     expect(vi.mocked(updateWaitingStatus)).not.toHaveBeenCalled();
+  });
+
+  it('控制台單頁權限仍可叫號與更新等候狀態，不提供追加檢查',async()=>{
+    await render([person({status:'等候中'}),person({id:'completed-person',status:'已完成',name:'已完成人員'})],session,false);
+    expect(button('追加檢查')).toBeUndefined();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    await click('叫號');
+    expect(callParticipant).toHaveBeenCalledWith('person-1');
+    const select=container.querySelector<HTMLSelectElement>('[aria-label="王小明 等候狀態"]')!;
+    await act(async()=>{select.value='上廁所';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(updateWaitingStatus).toHaveBeenCalledWith('person-1','上廁所');
+    expect(enqueueAdditionalExamination).not.toHaveBeenCalled();
+  });
+
+  it('未明確提供診間權限時預設不顯示追加檢查',async()=>{
+    await act(async()=>{root.render(<UltrasoundConsole current={session} participants={[person({status:'已完成'})]} onChanged={changed} onError={errors}/>);});
+    expect(button('追加檢查')).toBeUndefined();
+    expect(enqueueAdditionalExamination).not.toHaveBeenCalled();
+  });
+
+  it('同時有控制台與診間權限可維持既有追加檢查流程',async()=>{
+    await render([person({status:'已完成'})]);
+    await click('追加檢查');
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    await click('加入等候');
+    expect(enqueueAdditionalExamination).toHaveBeenCalledWith('person-1',['腹部超音波']);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('撤銷診間權限立即關閉追加視窗，既有暫存事件無法繞過權限重新開啟或送出',async()=>{
+    const completed=[person({status:'已完成'})];
+    await render(completed);
+    const staleOpen=clickHandler(button('追加檢查')!);
+    await click('追加檢查');
+    const staleSubmit=clickHandler(button('加入等候')!);
+    await render(completed,session,false);
+    expect(button('追加檢查')).toBeUndefined();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    await act(async()=>{staleOpen();staleSubmit();});
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(enqueueAdditionalExamination).not.toHaveBeenCalled();
+    await render(completed,session,true);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('切換場次會清除舊場次的追加檢查視窗',async()=>{
+    await render([person({status:'已完成'})]);
+    const staleOpen=clickHandler(button('追加檢查')!);
+    await click('追加檢查');
+    const staleSubmit=clickHandler(button('加入等候')!);
+    await render([],{...session,id:'next-session'});
+    await act(async()=>{staleOpen();staleSubmit();});
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(enqueueAdditionalExamination).not.toHaveBeenCalled();
+  });
+
+  it('尚未選擇場次時提供選場提示，控制台帳號不需前往報到站',async()=>{
+    await render([],null,false);
+    expect(container.textContent).toContain('請先選擇場次。');
+    expect(container.textContent).not.toContain('回健檢報到站');
   });
 
   it.each([3,8])('場次設定%s間時只顯示有效診間，舊房態不會增加診間燈',async roomCount=>{

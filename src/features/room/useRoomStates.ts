@@ -1,5 +1,6 @@
 import {useCallback,useEffect,useId,useRef,useState} from 'react';
 import {requireSupabase} from '../../lib/supabase';
+import {formatError} from '../../lib/errors';
 import type {RoomState} from '../../types';
 import {getSessionRoomCount,listRooms} from './service';
 import {getRoomCount,isRoomEnabled,isRoomStatus,isValidRoomCount,normalizeRoomId} from './status';
@@ -42,7 +43,9 @@ export function useRoomStates(sessionId:string|null|undefined,roomCount?:number|
       if(syncUnavailable.current&&activeSession.current===id)throw new Error('room_sync_disconnected');
       if(mounted.current&&activeSession.current===id&&generation===request.current)setSnapshot({sessionId:id,rooms,loading:false,error:''});
     }catch(error){
-      if(mounted.current&&activeSession.current===id&&generation===request.current)setSnapshot({sessionId:id,rooms:[],loading:false,error:syncUnavailable.current?syncError:readError});
+      const detail=formatError(error);
+      const message=detail==='此帳號沒有執行此功能的權限。'?detail:syncUnavailable.current?syncError:readError;
+      if(mounted.current&&activeSession.current===id&&generation===request.current)setSnapshot({sessionId:id,rooms:[],loading:false,error:message});
       throw error;
     }
   },[id]);

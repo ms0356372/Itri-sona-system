@@ -72,6 +72,26 @@ describe('診間房態即時同步與隔離',()=>{
     expect(latest.rooms).toEqual([]);
   });
 
+  it.each([
+    {message:'permission denied for table rooms',code:'42501'},
+    {message:'permission_denied',code:'P0001'},
+    {message:'not_authorized',code:'P0001'},
+  ])('房態查詢被RLS或RPC拒絕時清除房態且顯示權限中文 %s',async error=>{
+    await render();remote.list.mockRejectedValueOnce(error);
+    await act(async()=>{await expect(latest.refresh()).rejects.toEqual(error);});
+    expect(latest.rooms).toEqual([]);expect(latest.error).toBe('此帳號沒有執行此功能的權限。');
+    expect(latest.loading).toBe(false);
+  });
+
+  it('場次診間數量RLS讀取被拒絕時不使用快取資料或繼續載房態',async()=>{
+    await render();const queries=remote.list.mock.calls.length;
+    const error={message:'permission denied for table health_sessions',code:'42501'};
+    remote.count.mockRejectedValueOnce(error);
+    await act(async()=>{await expect(latest.refresh()).rejects.toEqual(error);});
+    expect(latest.rooms).toEqual([]);expect(latest.error).toBe('此帳號沒有執行此功能的權限。');
+    expect(remote.list).toHaveBeenCalledTimes(queries);
+  });
+
   it('訂閱中斷後REST成功亦不假裝已同步，必須SUBSCRIBED重連才恢復',async()=>{
     await render();
     await event(()=>channels[0].status?.('CHANNEL_ERROR'));

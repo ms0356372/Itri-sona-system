@@ -7,12 +7,12 @@
 - 觸控優先工作站介面、PWA manifest 與離線應用殼。
 - 報到站名單 Excel 欄名正規化、驗證、比對與預覽；工號一律用字串並保留前導零。
 - PostgreSQL 交易式 A–G 報到流水號、冪等報到與完成、狀態轉換 RPC。
-- Supabase Auth、場次成員角色、RLS、Realtime publication。
+- Supabase Auth、三個獨立工作頁面權限、RLS、Realtime publication。
 - 今日雲端排程以場次 UUID、participant UUID 與工號識別，不保存身分證。
 - Dexie 本機歷年資料及未完成檢查草稿；結果不會上傳 Supabase。
 - 可設定的超音波項目、診間統計、設備清除回報與 Phase 2 Bridge 介面。
 
-> 首頁在未設定 Supabase 時提供「設定模式」與虛構介面資料，方便確認安裝；正式資料讀寫一定需要已登入的工作人員。第一階段不再依工作站或診間細分資料庫權限。
+> 未設定 Supabase 時，首頁顯示「尚未設定雲端」且無法登入。正式工作資料必須先經 Supabase Auth 登入並確認帳號頁面權限；導覽、資料庫 RLS 與 RPC 都依同一份權限限制操作。
 
 ## Windows 開發
 
@@ -37,10 +37,10 @@ npm run build
 
 1. 在 Supabase Dashboard 建立專案，保留 Project URL 與 **Publishable/anon key**；絕不可將 service-role/secret key放進前端或 Git。
 2. Repository 已連接 Supabase GitHub Integration 時，設定 Production branch 為 `main`、Working directory 為 `.`，並開啟 **Deploy to production**。合併含有 `supabase/migrations/202609230001_initial.sql` 的 PR 後，由 Integration 套用尚未執行的 migration，不需要在 Windows 安裝 CLI。
-3. 在 Authentication 建立工作人員帳號，並關閉不符合院方帳號管理政策的公開註冊方式。第一階段以「已成功登入」作為工作人員授權邊界；所有工作人員可操作主要流程，不做工作站角色分級。
+3. 由管理者在 Authentication → Users 手動建立工作人員帳號，再到 Table Editor → `staff_permissions` 勾選工作頁面權限，詳見下方「帳號頁面權限」。登入維持 email/password；本功能不調整目前 Email confirmation 設定，也不新增公開註冊或其他登入流程。
 4. 複製 `.env.example` 為 `.env.local`，填入 `VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY`。不要使用 service role。
 
-Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime publication。`anon` 沒有資料表權限，且所有今日排程查詢都只允許 `authenticated`；瀏覽器端仍只能使用 Publishable/anon key，由登入 JWT 配合 RLS 放行。`participants` 不含身分證欄位，完整公司大名單只存在報到站的 IndexedDB。
+Migration 會建立資料表、交易式 RPC、RLS、明確 GRANT 與 Realtime publication。`anon` 沒有作業資料表權限；`authenticated` 還需有效的 `staff_permissions` 才能讀取工作資料，寫入依功能檢查對應頁面權限。瀏覽器端仍只使用 Publishable/anon key，由登入 JWT 配合 RLS 與 RPC 檢查放行。`participants` 不含身分證欄位，完整公司大名單只存在報到站的 IndexedDB。
 
 ### 第一次資料庫部署檢查
 
@@ -135,18 +135,18 @@ where routine_schema = 'public'
 2. 選單選「安裝應用程式」或「加到主畫面」，允許站點儲存空間；不要使用無痕模式。
 3. 每台平板建立不同設備 ID/診間，加入同一 `health_session`。控制台訂閱該場次 Realtime；各診間仍各自匯入本機歷史資料。
 4. 正式開始前，用兩台設備測試報到、叫號、開始、完成及斷線提示。裝置時間應自動校時，資料庫存 UTC，畫面以 `Asia/Taipei` 顯示。
-5. PWA shell 可離線開啟，但正式完成必須等 Supabase 成功回覆；離線時維持「檢查中／待同步」，不可宣告完成。
+5. PWA shell 可離線開啟；離線或帳號權限同步失敗時，工作頁面會停止顯示並清空記憶體中的工作資料，重新連線確認權限後再載入。雲端既有檢查狀態與本機歷年資料保留；正式完成必須等 Supabase 成功回覆，不可在離線時宣告完成。
 
 ## 結束場次與資料生命週期
 
-管理者先查看總人數、報到、完成、未完成、各診間件數，再發出清除要求。每台在線診間清空自己的 history/draft IndexedDB 後回報；離線或未回報設備會保留 pending，雲端流程不會假裝其已清除。請逐台確認後才能關閉場次。
+具有 `can_registration` 的工作人員才能執行清除排程、刪除／關閉場次及設備清除回報。設備清除 service 先確認目前登入者與報到站權限，再只清理本機檢查草稿，保留歷年醫療資料；本機清除失敗不送出 acknowledgment。`close_health_session` 有尚未回報的設備清除要求時會保留 pending，不會宣告雲端清除完成。
 
 `DELETE` 只清除此應用的線上作業資料與在線瀏覽器資料，**不代表 Supabase 備份、WAL、瀏覽器備份或實體媒體立刻且不可復原**。保留期限、備份刪除及裝置退役須依院方與 Supabase 方案另訂政策。本系統不會刪除院方原正式健檢系統。
 
 ## 安全注意事項
 
 - 不提交正式個資、Excel 或 `.env`；身分證只保存在報到站本機 IndexedDB 與使用者主動匯出的完整 Excel，不寫入 Supabase、`note`、JSON、其他文字欄位、console 或 error log。
-- RLS 是資料邊界，按鈕隱藏不是授權。只有 Supabase Auth 已登入的受管理工作人員可讀寫作業資料；應停用不需要的公開註冊並落實帳號停權流程。
+- RLS 與 RPC 內的頁面權限檢查共同限制操作，按鈕隱藏不是授權。Supabase Auth 登入後，還需 `is_active = true` 與對應頁面權限；管理者可在 `staff_permissions` 取消權限或停用帳號。
 - 歷年醫療內容不經雲端同步；裝置需螢幕鎖、磁碟加密、遠端管理及人員交接程序。
 - 正式上線前必須完成院方威脅模型、DPIA/法遵、備份與復原演練、稽核及 Supabase 專案安全設定審查。
 
@@ -177,7 +177,7 @@ where routine_schema = 'public'
 
 既有 schema 沒有診間狀態欄位，因此 `202610070001_room_away.sql` 新增 `public.rooms(session_id, room_id, status, updated_at)`，以 `(session_id, room_id)` 隔離場次與診間；`status` 使用 `public.room_status` 的 `idle`、`in_progress`、`away`。沒有新增前態、病人資料或離席原因欄位。返回時從既有未完成檢查推導 `in_progress` 或 `idle`。
 
-請透過既有 Supabase migration 部署流程套用此新增 SQL，再發布相應前端；勿修改或重貼原 migration。新診間狀態表僅允許已授權工作人員讀取，寫入使用 `set_room_away(p_session_id, p_room_id, p_away)`。原開始／完成 RPC 以同一診間資料列鎖阻擋離席操作與同診間重複接人。既有進行中檢查會回填房態，清排程／刪受檢者會釋放一般診間而保留離席狀態。
+請透過既有 Supabase migration 部署流程套用此新增 SQL，再發布相應前端；勿修改或重貼原 migration。新診間狀態表僅允許已授權工作人員讀取，寫入使用 `set_room_away(p_session_id, p_room_id, p_away)`，並要求 `can_room`。原開始／完成 RPC 以同一診間資料列鎖阻擋離席操作與同診間重複接人。既有進行中檢查會回填房態，清排程／刪受檢者會釋放一般診間而保留離席狀態。
 
 按下離開／返回僅修改房態，保留查詢、受檢者、歷年資料、選擇項目、原檢查時間與確認操作。切換診間時，尚在此頁面的工作畫面依場次與診間暫存，不相互覆蓋。重新整理／其他裝置重新讀取持久化房態及既有進行中檢查；未開始的完整查詢畫面不會上傳雲端。歷年資料與草稿維持原本機保存方式。
 
@@ -199,7 +199,7 @@ bash scripts/test-room-away-db.sh
 
 增量 migration `supabase/migrations/202610070002_session_room_count.sql` 在現有 `health_sessions` 加入 `room_count integer not null default 4` 及範圍限制。舊場次補為 4，已有診間狀態與檢查歷史保留。診間 ID 沿用目前的「診間 1」格式，`room_count` 決定有效房號，`rooms.status` 維持 `idle`、`in_progress`、`away` 的即時狀態。
 
-新增場次會在同一資料庫交易內初始化有效診間。增加數量只補上缺少的診間，使用 `ON CONFLICT DO NOTHING`，不會將原有 `away` 或 `in_progress` 重設。編輯透過 `update_session_room_count(p_session_id, p_room_count)`：減少時，資料庫鎖定場次並檢查欲停用診間的狀態與尚未完成檢查，任何檢查中、暫時離開或未完成受檢者都會拒絕整筆變更。成功減少後仍保留舊 `rooms` 與完成檢查紀錄。過去日期、正在結束或已結束的場次，其診間數量唯讀。
+新增場次會在同一資料庫交易內初始化有效診間。增加數量只補上缺少的診間，使用 `ON CONFLICT DO NOTHING`，不會將原有 `away` 或 `in_progress` 重設。編輯透過要求 `can_registration` 的 `update_session_room_count(p_session_id, p_room_count)`，一般 client 不能直接 UPDATE `room_count`：減少時，資料庫鎖定場次並檢查欲停用診間的狀態與尚未完成檢查，任何檢查中、暫時離開或未完成受檢者都會拒絕整筆變更。成功減少後仍保留舊 `rooms` 與完成檢查紀錄。過去日期、正在結束或已結束的場次，其診間數量唯讀。
 
 報到站、控制台、診間選擇器與診間狀態列表依各場次數量產生房號，忽略保留的超範圍診間資料。場次設定透過 `health_sessions` Realtime 同步；重新載入、切換場次與重連時會重讀雲端設定。現有叫號仍為共用候檢隊列；實際指定診間的 `start_examination` 同時限制有效房號、`idle` 且沒有其他進行中檢查，排除 `away`、`in_progress` 及超出 `room_count` 的診間。
 
@@ -214,3 +214,120 @@ bash scripts/test-session-room-count-db.sh
 ```
 
 SQL 測試使用暫存本機 PostgreSQL，不修改正式 Supabase；正式發布後可再用兩台平板驗收實體裝置的 Realtime 同步。
+
+## 帳號頁面權限
+
+每個 Supabase Auth 工作人員帳號使用三個獨立 Boolean 決定可用工作頁面，允許任意組合，不使用固定角色 enum。帳號維持 **email + password** 登入，由管理者在 Supabase Dashboard 建立；PWA 沒有 Sign up、Email 驗證流程、OTP、Magic Link 或第三方登入。本次不修改 Supabase 專案的 Email confirmation 設定，也不需要寄送或接收 Email；合法 Email 格式只作為登入帳號名稱。
+
+### 權限資料與既有帳號
+
+增量 migration `supabase/migrations/202610070003_staff_page_permissions.sql` 新增 `public.staff_permissions`：
+
+| 欄位 | 型別與限制 | 新帳號預設／用途 |
+|---|---|---|
+| `user_id` | uuid primary key，references `auth.users(id)` on delete cascade | Auth User ID |
+| `login_email` | text，可為 null | 複製 Auth Email，方便 Table Editor 辨識 |
+| `display_name` | text not null | `''`；可由管理者填寫顯示名稱 |
+| `can_registration` | boolean not null | `false`；健檢報到站 |
+| `can_console` | boolean not null | `false`；超音波控制台 |
+| `can_room` | boolean not null | `false`；超音波診間 |
+| `is_active` | boolean not null | `true`；是否啟用本系統存取 |
+| `created_at` | timestamptz not null | `now()` |
+| `updated_at` | timestamptz not null | `now()`；更新 trigger 維護 |
+
+Migration 當下既有 `auth.users` 會 backfill 為三個頁面權限及 `is_active` **全部 true**，既有工作人員不會因部署被鎖死；若已存在 permission row，`ON CONFLICT DO NOTHING` 保留其原設定，不會重新授予權限。Migration 不修改既有場次、診間數量或檢查紀錄，也不寫死任何 Email。
+
+Migration 後新增的 Auth User，由 `auth.users` trigger 自動建立三個權限 **全部 false**、`is_active = true` 的 permission row，需管理者再授權。Trigger 只讀 Auth 的實際 `id`／`email`，不採信使用者 metadata；後續 Auth Email 修改會同步 `login_email`，保留已設定的權限、名稱及停用狀態。刪除 Auth User 時，其 permission row 隨外鍵 cascade 刪除。
+
+### 新增工作人員帳號
+
+1. 開啟 **Supabase Dashboard → Authentication → Users**。
+2. 選擇 **Add user**，輸入合法 Email 格式帳號，例如 `room01@itri.example.com`，並設定 password。
+3. 完成建立，沿用專案目前可用的 email/password 與 Email confirmation 設定。
+4. 開啟 **Table Editor → public → staff_permissions**，以 `login_email` 找到剛建立的帳號。
+5. 視需要填寫 `display_name`，勾選所需的 `can_registration`、`can_console`、`can_room`，確認 `is_active = true` 並儲存。
+6. 使用該帳號登入 PWA，確認只出現已授權工作頁面。
+
+例如診間帳號 `room01@itri.example.com` 設為 `false / false / true`；控制台帳號可使用 `console01@itri.example.com`，報到站帳號可使用 `checkin01@itri.example.com`。尚未勾選任何權限的新帳號仍可完成 Auth 登入，但只能查看權限提示及登出。
+
+| 帳號用途 | 健檢報到 `can_registration` | 超音波控制 `can_console` | 超音波診間 `can_room` |
+|---|---|---|---|
+| 全功能工作站 | ✅ | ✅ | ✅ |
+| 健檢報到站 | ✅ | ❌ | ❌ |
+| 超音波控制台 | ❌ | ✅ | ❌ |
+| 超音波診間 | ❌ | ❌ | ✅ |
+| 現場主管 | ✅ | ✅ | ❌ |
+
+此表為使用範例，三個 Boolean 仍可設定其他任意組合。停用帳號請將 `is_active` 改為 false；恢復啟用後仍使用原本的三個權限設定。
+
+### RLS、欄位授權與 RPC
+
+`is_active_staff()`、`can_use_registration()`、`can_use_console()`、`can_use_room()` 均以 `auth.uid()` 查詢目前帳號的 permission row，使用 `SECURITY DEFINER`、`STABLE` 與空 `search_path`，不接受前端 user_id 作為授權依據。`can_access_session(p_session_id)` 要求場次存在、帳號啟用且至少有一個工作頁面權限，只代表必要場次的共用讀取權限，不代表可修改資料。
+
+- **共用 SELECT**：啟用且至少有一個頁面權限的帳號，可讀取工作所需的 `health_sessions`、`participants`、`examinations`、`rooms` 與項目目錄；無任何頁面權限或已停用帳號無法讀取這些工作資料。
+- **健檢報到站**：`can_registration` 才能建立／管理場次、匯入及修改基本排程、新增／刪除 participant、報到、清除排程、關閉／刪除場次及執行設備清除管理。Client 的 INSERT／UPDATE 只授予現有 service 必要欄位；不能直接修改 participant 的 workflow status、報到號／時間、叫號時間或場次 `status`／`room_count`。
+- **超音波控制台**：`can_console` 才能透過指定 RPC 叫號或修改等候狀態，沒有整張 `participants` 的 UPDATE 權限。
+- **超音波診間**：`can_room` 才能開始／完成檢查、追加檢查、暫時離開／返回診間或讀取檢查時鐘。`rooms` 與 `examinations` 對一般 client 僅開放 SELECT，狀態寫入必須使用 RPC。
+
+目前 13 個對外工作 RPC 的函數內均明確檢查下列權限，直接呼叫 Supabase API 也不能跳過。原有交易鎖、重試冪等、伺服器時間、追加 round、房數安全檢查及歷史保留邏輯維持：
+
+| RPC | 必要頁面權限 | 操作 |
+|---|---|---|
+| `check_in_participant` | `can_registration` | 報到及流水號 |
+| `update_session_room_count` | `can_registration` | 安全調整診間數量 |
+| `clear_session_schedule` | `can_registration` | 清除今日排程 |
+| `delete_health_session` | `can_registration` | 刪除場次 |
+| `close_health_session` | `can_registration` | 關閉場次及雲端清除 |
+| `acknowledge_device_clear` | `can_registration` | 設備清除回報 |
+| `set_waiting_status` | `can_console` | 等候狀態 |
+| `call_participant` | `can_console` | 叫號 |
+| `start_examination` | `can_room` | 開始檢查 |
+| `complete_examination` | `can_room` | 完成檢查 |
+| `enqueue_additional_examination` | `can_room` | 追加 examination round |
+| `set_room_away` | `can_room` | 暫時離開／返回診間 |
+| `examination_clock` | `can_room` | 伺服器檢查時鐘 |
+
+所有上述權限也要求 `is_active = true`；修改類 RPC 在 `SECURITY DEFINER` 內檢查，`examination_clock` 是同樣檢查 `can_room` 的 `SECURITY INVOKER`。舊版接受裝置時間的開始／完成 overload 已退役，內部 trigger／房號 helper 不授予一般 client EXECUTE。
+
+控制台既有「追加檢查」入口屬於診間操作，所以在控制台使用該按鈕需同時具備 `can_console` **及** `can_room`；console-only 可叫號及調整候檢狀態，但看不到追加按鈕，也不能直接呼叫追加 RPC。room-only 可呼叫追加 RPC，也可在診間開始／完成已排隊的追加 round；目前建立追加項目的 UI 入口仍位於控制台。
+
+`staff_permissions` 啟用 RLS：一般 `authenticated` 只能 SELECT 自己的 row，即使停用或取消全部頁面權限仍可讀自己設定以顯示原因；不授予 INSERT／UPDATE／DELETE，不能替自己或他人授權。`anon` 完全不能讀寫。第一版沒有 PWA 帳號管理介面，權限由管理者透過 Dashboard／Table Editor 管理；前端不新增 service_role／secret key。
+
+資料匯出入口只在已授權的報到站顯示，正在匯出時若頁面卸載或權限重新確認，前端不再觸發下載。各工作頁面需要共用 SELECT 的作業資料仍可由其合法 API 讀取；頁面權限不宣稱能阻止使用者自行另存其可讀資料。
+
+### 登入、權限同步與錯誤提示
+
+App 在 Auth 登入後先載入 `staff_permissions`，確認啟用及可用頁面後才查詢場次／participant 或掛載工作頁面。導覽只列出可用頁面；登入預設依 **健檢報到站 → 超音波控制台 → 超音波診間** 選擇第一個可用頁面，因此 room-only 直接進診間。頁面 Guard 同時檢查 render，舊 page state 或 localStorage 不會開啟未授權頁面。
+
+| 帳號狀態 | 顯示訊息 |
+|---|---|
+| 沒有 permission row | 此帳號尚未設定系統權限，請洽管理員。 |
+| `is_active = false` | 此帳號目前已停用，請洽管理員。 |
+| 三個頁面權限全部 false | 此帳號目前沒有可使用的工作頁面，請洽管理員。 |
+| 資料庫拒絕功能操作 | 此帳號沒有執行此功能的權限。 |
+
+前三種狀態只提供登出，不載入場次、今日排程、受檢者、診間狀態或 examination。權限讀取／同步失敗也停止工作存取，不使用快取權限繼續放行。帳號切換、權限重新確認或工作存取被取消時，App 清空記憶體工作資料、解除工作訂閱，並忽略先前帳號／場次尚未完成的查詢回應。本機歷年 IndexedDB 的內容、格式及身分證不上雲端的規則維持。
+
+`staff_permissions` 加入既有 `supabase_realtime` publication，前端以目前登入者 `user_id` 訂閱。INSERT／UPDATE 依自己的 SELECT RLS 控制可見資料；事件只觸發重新向資料庫查詢自己的 permission row，不將 payload 當成授權。管理者取消目前頁面權限後，導覽立即更新並切換到下一個可用頁面；取消最後一個權限或停用後停止載入工作資料。
+
+Supabase Postgres Changes 的 DELETE 不套用列級 RLS，刪除通知在 RLS 表只帶主鍵；本表使用預設 replica identity，不傳送被刪帳號的 Email、名稱或權限 flags，但未篩選的訂閱可能收到被刪 row 的 UUID。權限變更管理使用 UPDATE 取消權限或停用；權限 row 被刪除後，重新整理、取得 focus、可見頁籤及重連時重新查詢也會正確拒絕。離線、Realtime 中斷或讀取失敗會暫停工作頁面並清空記憶體工作資料，恢復連線並確認權限後才重新載入。
+
+### 部署與測試
+
+沿用 GitHub → Supabase Integration 的增量 migration 流程。合併到 `main` 後，確認 `202610070003_staff_page_permissions` deployment／migration log 成功，再使用相應前端；不用在 SQL Editor 手動貼 SQL，也不用另外修改 RLS 或登入設定。管理者只需為新帳號在 Table Editor 勾選權限，既有帳號已由 backfill 保持可用。
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+bash scripts/test-staff-permissions-db.sh
+```
+
+只執行權限前端測試可用：
+
+```sh
+npm test -- src/test/staff-permissions-service.test.ts src/test/staff-permissions-app.test.tsx src/test/staff-permissions-sync.test.tsx
+```
+
+資料庫測試在無網路、無對外連接埠的暫存 PostgreSQL 容器套用全部 migration，驗證既有帳號 backfill、Auth 新帳號／Email trigger、八種 Boolean 組合、停用／缺 row、自己的權限 SELECT、直接 API／欄位寫入拒絕、13 個 RPC gate、實際報到／控制台／診間流程與權限取消後的立即拒絕，並執行房態／房數回歸及六組獨立連線競態；不連線正式 Supabase。前端測試涵蓋預設頁面、Guard、拒絕時不載入資料、Realtime／focus／離線及跨帳號舊回應。正式發布後仍需實體平板驗收登入、權限更新及 Realtime 同步。

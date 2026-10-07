@@ -19,6 +19,7 @@ const formatElapsed=(seconds:number)=>[Math.floor(seconds/3600),Math.floor(secon
 const cloudMessage='無法連線至雲端，檢查紀錄尚未完成同步，請確認網路後重試。';
 const roomError=(error:unknown)=>{
   const detail=formatError(error);
+  if(detail==='此帳號沒有執行此功能的權限。')return detail;
   if(detail.includes('room_away'))return '診間目前暫時離開，請先返回診間。';
   if(detail.includes('room_occupied'))return '此診間已有受檢者檢查中，請重新同步診間資料。';
   if(detail.includes('examination_in_other_room'))return `此受檢者正在${detail.split(':').at(-1)}檢查中。`;
@@ -92,7 +93,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
         await applyExamination(value,person);
         if(person){const history=await findHistoryByEmployeeNo(person.employeeNo);if(!cancelled&&workspaceKeyRef.current===key)setRecords(history);}
       }
-    }).catch(()=>{if(!cancelled)setMessage(cloudMessage);}).finally(()=>{if(!cancelled)setRestoring(false);});
+    }).catch(error=>{if(!cancelled)setMessage(roomError(error));}).finally(()=>{if(!cancelled)setRestoring(false);});
     return()=>{cancelled=true;invalidateSelection();};
   },[workspaceKey,demo,current?.id,room,applyExamination,invalidateSelection]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{
@@ -119,7 +120,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
         const updated=rounds.find(value=>value.id===examination.id);
         if(valid()&&updated?.status==='completed'){setExamination(updated);setConfirming(false);}
       }
-    })().catch(()=>{if(valid())setMessage(cloudMessage);});
+    })().catch(error=>{if(valid())setMessage(roomError(error));});
     return()=>{cancelled=true;};
   },[participants,liveRoom?.updatedAt,loadedWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
   const selectPerson=async(person:Participant|null,history:HistoricalRecord[]=[] )=>{
@@ -133,7 +134,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
       if(existing){await applyExamination(existing,person);if(request!==selectionRequest.current||key!==workspaceKeyRef.current)return;if(existing.status==='in_progress'&&existing.roomId!==room)setMessage(`此受檢者正在${existing.roomId}檢查中。`);return;}
       const draft=await restoreDraft(person.id);
       if(request===selectionRequest.current&&key===workspaceKeyRef.current&&draft&&normalizeRoomId(draft.roomId)===room)setItems(draft.items.filter(item=>ultrasoundItems.includes(item as UltrasoundItem)) as UltrasoundItem[]);
-    }catch{if(request===selectionRequest.current&&key===workspaceKeyRef.current)setMessage(cloudMessage);}
+    }catch(error){if(request===selectionRequest.current&&key===workspaceKeyRef.current)setMessage(roomError(error));}
   };
   const search=async(raw=query)=>{
     if(patientActionsDisabled||locked)return;
@@ -160,7 +161,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
         if(workspaceKeyRef.current===key)roomStates.acceptRoom(value);
         await roomStates.refresh();
       }
-    }catch(error){if(workspaceKeyRef.current===key)setMessage(`診間狀態同步失敗：${formatError(error)}`);}
+    }catch(error){if(workspaceKeyRef.current===key){const detail=formatError(error);setMessage(detail==='此帳號沒有執行此功能的權限。'?detail:`診間狀態同步失敗：${detail}`);}}
     finally{operationPending.current=false;setBusy(false);}
   };
   const toggle=(item:UltrasoundItem)=>{if(patientActionsDisabled)return;const next=items.includes(item)?items.filter(x=>x!==item):[...items,item];setItems(next);setExpanded(old=>old.includes(item)?old:[...old,item]);if(selected&&!demo)void saveExaminationDraft(selected.id,room,next);};
@@ -217,6 +218,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
       </div>
       <div className="room-toolbar-actions"><button role="switch" disabled={locked||busy||away} aria-checked={demo} className={demo?'bg-sky-100 text-sky-900 secondary':'secondary'} onClick={()=>setDemo(x=>!x)}>{demo?'展示：開':'展示'}</button><button className="secondary" aria-expanded={settingsOpen} onClick={()=>setSettingsOpen(value=>!value)}><SlidersHorizontal size={18}/>UI調整</button><button className="secondary" onClick={()=>setImportOpen(true)}><FileSpreadsheet size={18}/>歷年資料</button></div>
     </header>
+    {!current&&!demo&&<div className="room-message" role="status">請先選擇場次。</div>}
     {away&&<div className="room-away-notice" role="status">醫師暫時離席；請先返回診間，再繼續操作。目前受檢者與檢查資料已保留。</div>}
     {!demo&&roomStates.error&&<div role="alert" className="room-message">{roomStates.error}<button className="secondary" onClick={()=>void roomStates.refresh().catch(()=>undefined)}>重新同步</button></div>}
     {message&&<div role="alert" className="room-message">{message}</div>}

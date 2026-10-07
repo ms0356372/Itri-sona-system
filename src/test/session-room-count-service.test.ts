@@ -68,6 +68,6 @@ describe('場次診間數量資料與更新',()=>{
   it('錯誤formatter處理Supabase structured error，未知訊息仍保留',()=>{
     expect(formatRoomCountError({message:'invalid_room_count'})).toContain('1～8');
     expect(formatRoomCountError({message:'connection failed'})).toBe('connection failed');
-    expect(formatRoomCountError(new Error('not_authorized'))).toContain('沒有修改場次');
+    expect(formatRoomCountError(new Error('not_authorized'))).toBe('此帳號沒有執行此功能的權限。');
   });
 });
