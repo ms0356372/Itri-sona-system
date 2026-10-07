@@ -43,7 +43,7 @@ describe('診間檢查查詢的舊名稱相容性',()=>{
     expect(restored).toEqual({id:'current-round',participantId:'person-1',roundNo:2,roomId:'診間 1',startedAt,completedAt:null,durationSeconds:null,selectedItems:['腹部超音波','甲狀腺超音波'],actualItems:[],itemCount:0,status:'in_progress'});
     expect(remote.queries[0]).toMatchObject({table:'examinations',selection:'*,participants!inner(session_id)'});
     expect(remote.queries[0].equals).toContainEqual(['participants.session_id','current-session']);
-    expect(remote.queries[0].inFilters).toContainEqual(['room_id',['診間 1','診間1']]);
+    expect(remote.queries[0].inFilters).toContainEqual(['room_id',['診間 1','診間1','room_1']]);
     expect(remote.rows[3].room_id).toBe('診間1');expect(remote.rows[3].started_at).toBe(startedAt);
   });
 
@@ -67,5 +67,11 @@ describe('診間檢查查詢的舊名稱相容性',()=>{
   it('等待追加且尚未指定診間的輪次保留 null 與原項目，不產生偽造診間或開始時間',async()=>{
     remote.rows=[row({room_id:null,status:'waiting',started_at:null})];
     expect(await getExamination('person-1')).toMatchObject({roomId:null,startedAt:null,status:'waiting',selectedItems:['腹部超音波','甲狀腺超音波']});
+  });
+
+  it.each(['診間8','診間 8','room_8'])('擴增診間後以%s查詢保留舊別名並恢復原檢查資料',async roomId=>{
+    remote.rows=[row({room_id:'room_8'})];
+    expect(await getRoomExamination('current-session',roomId)).toMatchObject({roomId:'診間 8',startedAt,status:'in_progress'});
+    expect(remote.queries[0].inFilters).toContainEqual(['room_id',['診間 8','診間8','room_8']]);
   });
 });

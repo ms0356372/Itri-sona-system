@@ -5,7 +5,7 @@ import {UltrasoundConsole} from '../features/console/Console';
 import {callParticipant,updateWaitingStatus} from '../features/console/service';
 import {listExaminations} from '../features/examination/service';
 import {useRoomStates} from '../features/room/useRoomStates';
-import {roomIds} from '../features/room/status';
+import {getRoomIds} from '../features/room/status';
 import type {Examination,Participant,RoomState,Session} from '../types';
 
 vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn()}));
@@ -22,8 +22,8 @@ let container:HTMLDivElement;
 let changed:ReturnType<typeof vi.fn>;
 let errors:ReturnType<typeof vi.fn>;
 
-function setRoomStatuses(occupied:readonly number[]=[],away:readonly number[]=[],sessionId=session.id){
-  const rooms:RoomState[]=roomIds.map((roomId,index)=>({sessionId,roomId,status:away.includes(index+1)?'away':occupied.includes(index+1)?'in_progress':'idle',updatedAt:null}));
+function setRoomStatuses(occupied:readonly number[]=[],away:readonly number[]=[],sessionId=session.id,roomCount=4){
+  const rooms:RoomState[]=getRoomIds(roomCount).map((roomId,index)=>({sessionId,roomId,status:away.includes(index+1)?'away':occupied.includes(index+1)?'in_progress':'idle',updatedAt:null}));
   vi.mocked(useRoomStates).mockReturnValue({rooms,loading:false,error:'',refresh:vi.fn(async()=>{}),acceptRoom:vi.fn()});
 }
 
@@ -92,13 +92,51 @@ describe('超音波控制台診間狀態',()=>{
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=false;
   });
 
-  it('目前沒有受檢者時固定顯示診間1～4，全部為綠色空閒',async()=>{
+  it('舊場次未設定診間數量時預設顯示診間1～4，全部為綠色空閒',async()=>{
     await render();
     expectRooms();
     expect(container.textContent).toContain('此分組尚無今日受檢者。');
     expect(list).toHaveBeenCalledWith([]);
     expect(vi.mocked(callParticipant)).not.toHaveBeenCalled();
     expect(vi.mocked(updateWaitingStatus)).not.toHaveBeenCalled();
+  });
+
+  it.each([3,8])('場次設定%s間時只顯示有效診間，舊房態不會增加診間燈',async roomCount=>{
+    setRoomStatuses([roomCount],[1],session.id,8);
+    await render([], {...session,roomCount});
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(roomCount);
+    expect(indicator(roomCount).getAttribute('aria-label')).toBe(`診間${roomCount}：檢查中`);
+    expect(indicator(1).getAttribute('aria-label')).toBe('診間1：暫時離開');
+    expect(vi.mocked(useRoomStates)).toHaveBeenCalledWith(session.id,roomCount);
+    if(roomCount<8)expect(roomGroup().textContent).not.toContain(`診間${roomCount+1}`);
+  });
+
+  it('房態即時更新的診間數量優先生效，即使場次prop尚未更新也不顯示已停用診間',async()=>{
+    setRoomStatuses([],[],session.id,8);
+    // Use a preserved cloud snapshot to model a session Realtime event arriving before App reload.
+    vi.mocked(useRoomStates).mockReturnValue({rooms:getRoomIds(8).map(roomId=>({sessionId:session.id,roomId,status:'idle',updatedAt:null})),loading:false,error:'',refresh:vi.fn(async()=>{}),acceptRoom:vi.fn(),roomCount:2});
+    await render([], {...session,roomCount:8});
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(2);
+  });
+
+  it.each(['檢查中','已完成'] as const)('目前場次%s表格不顯示超出room_count的歷史診間',async status=>{
+    setRoomStatuses([],[],session.id,8);
+    list.mockResolvedValue([examination({roomId:'room_6',status:status==='已完成'?'completed':'in_progress'})]);
+    await render([person({status})], {...session,roomCount:3});
+    expect(roomCell()).toBe('—');
+    expect(container.textContent).not.toContain('room_6');
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(3);
+  });
+
+  it('切換不同場次及歷史場次會保留各自診間數量',async()=>{
+    setRoomStatuses([],[],session.id,8);
+    await render([], {...session,roomCount:8});
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(8);
+    const historySession:Session={...session,id:'history-session',status:'closed',roomCount:2};
+    setRoomStatuses([],[],historySession.id,8);
+    await render([],historySession);
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(2);
+    expect(vi.mocked(useRoomStates)).toHaveBeenLastCalledWith(historySession.id,2);
   });
 
   it.each([1,2,3,4])('雲端診間%s為檢查中時亮紅燈，表格使用無空白的診間名稱',async room=>{

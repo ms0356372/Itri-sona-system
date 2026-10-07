@@ -192,3 +192,25 @@ bash scripts/test-room-away-db.sh
 ```
 
 此測試僅使用無對外連接埠、無網路的本機 PostgreSQL 17 暫存容器，驗證所有 migration、RLS／GRANT、房態保留、回復、追加檢查與同時開始競態；不連線正式 Supabase。正式發布後仍需兩台登入同一場次的實體平板驗收 Realtime。
+
+## 每個場次的超音波診間數量
+
+場次管理的新增與編輯畫面可設定超音波診間數量，並預覽將啟用的診間。前端統一使用 `src/features/room/config.ts` 的 `MIN_ROOM_COUNT = 1`、`MAX_ROOM_COUNT = 8`、`DEFAULT_ROOM_COUNT = 4`；場次列表與詳細資料也顯示已儲存的數量。
+
+增量 migration `supabase/migrations/202610070002_session_room_count.sql` 在現有 `health_sessions` 加入 `room_count integer not null default 4` 及範圍限制。舊場次補為 4，已有診間狀態與檢查歷史保留。診間 ID 沿用目前的「診間 1」格式，`room_count` 決定有效房號，`rooms.status` 維持 `idle`、`in_progress`、`away` 的即時狀態。
+
+新增場次會在同一資料庫交易內初始化有效診間。增加數量只補上缺少的診間，使用 `ON CONFLICT DO NOTHING`，不會將原有 `away` 或 `in_progress` 重設。編輯透過 `update_session_room_count(p_session_id, p_room_count)`：減少時，資料庫鎖定場次並檢查欲停用診間的狀態與尚未完成檢查，任何檢查中、暫時離開或未完成受檢者都會拒絕整筆變更。成功減少後仍保留舊 `rooms` 與完成檢查紀錄。過去日期、正在結束或已結束的場次，其診間數量唯讀。
+
+報到站、控制台、診間選擇器與診間狀態列表依各場次數量產生房號，忽略保留的超範圍診間資料。場次設定透過 `health_sessions` Realtime 同步；重新載入、切換場次與重連時會重讀雲端設定。現有叫號仍為共用候檢隊列；實際指定診間的 `start_examination` 同時限制有效房號、`idle` 且沒有其他進行中檢查，排除 `away`、`in_progress` 及超出 `room_count` 的診間。
+
+沿用既有 GitHub → Supabase Integration：合併至 `main` 後確認此 migration 的 deployment log 成功，再使用新前端。不需另外建立資料表、調整 RLS 或在 SQL Editor 手動貼 SQL。資料庫測試指令與一般驗證：
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+bash scripts/test-session-room-count-db.sh
+```
+
+SQL 測試使用暫存本機 PostgreSQL，不修改正式 Supabase；正式發布後可再用兩台平板驗收實體裝置的 Realtime 同步。
