@@ -4,10 +4,13 @@ import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {UltrasoundConsole} from '../features/console/Console';
 import {callParticipant,updateWaitingStatus} from '../features/console/service';
 import {listExaminations} from '../features/examination/service';
-import type {Examination,Participant,Session} from '../types';
+import {useRoomStates} from '../features/room/useRoomStates';
+import {roomIds} from '../features/room/status';
+import type {Examination,Participant,RoomState,Session} from '../types';
 
 vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn()}));
 vi.mock('../features/examination/service',async importOriginal=>({...await importOriginal<typeof import('../features/examination/service')>(),listExaminations:vi.fn(),enqueueAdditionalExamination:vi.fn()}));
+vi.mock('../features/room/useRoomStates',()=>({useRoomStates:vi.fn()}));
 
 const session:Session={id:'console-session',companyName:'ITRI',sessionDate:'2026-10-07',status:'active'};
 const person=(patch:Partial<Participant>={}):Participant=>({id:'person-1',sessionId:session.id,sequence:1,employeeNo:'00125',name:'王小明',gender:'男',slot:'07:30~08:00',groupCode:'A',plannedItems:['腹部超音波'],checkinNo:'A1',status:'檢查中',checkedInAt:'2026-10-07T00:00:00Z',calledAt:'2026-10-07T00:01:00Z',note:'',updatedAt:'2026-10-07T00:02:00Z',...patch});
@@ -18,6 +21,11 @@ let root:Root;
 let container:HTMLDivElement;
 let changed:ReturnType<typeof vi.fn>;
 let errors:ReturnType<typeof vi.fn>;
+
+function setRoomStatuses(occupied:readonly number[]=[],away:readonly number[]=[],sessionId=session.id){
+  const rooms:RoomState[]=roomIds.map((roomId,index)=>({sessionId,roomId,status:away.includes(index+1)?'away':occupied.includes(index+1)?'in_progress':'idle',updatedAt:null}));
+  vi.mocked(useRoomStates).mockReturnValue({rooms,loading:false,error:'',refresh:vi.fn(async()=>{}),acceptRoom:vi.fn()});
+}
 
 async function until(condition:()=>boolean){
   for(let attempt=0;attempt<100;attempt++){
@@ -72,6 +80,7 @@ describe('超音波控制台診間狀態',()=>{
     vi.mocked(updateWaitingStatus).mockReset();
     changed=vi.fn(async()=>{});
     errors=vi.fn();
+    setRoomStatuses();
     container=document.createElement('div');
     document.body.append(container);
     root=createRoot(container);
@@ -92,7 +101,8 @@ describe('超音波控制台診間狀態',()=>{
     expect(vi.mocked(updateWaitingStatus)).not.toHaveBeenCalled();
   });
 
-  it.each([1,2,3,4])('受檢者及本輪皆檢查中時診間%s亮紅燈，表格使用無空白的診間名稱',async room=>{
+  it.each([1,2,3,4])('雲端診間%s為檢查中時亮紅燈，表格使用無空白的診間名稱',async room=>{
+    setRoomStatuses([room]);
     list.mockResolvedValue([examination({roomId:`診間 ${room}`})]);
     await render([person()]);
     expectRooms([room]);
@@ -119,6 +129,7 @@ describe('超音波控制台診間狀態',()=>{
   });
 
   it('同一診間重複出現檢查中人員時只顯示一盞紅燈',async()=>{
+    setRoomStatuses([1]);
     list.mockResolvedValue([examination(),examination({id:'exam-2',participantId:'person-2'})]);
     await render([person(),person({id:'person-2',sequence:2,employeeNo:'00126',name:'李小華',checkinNo:'A2'})]);
     expectRooms([1]);
@@ -128,6 +139,7 @@ describe('超音波控制台診間狀態',()=>{
   });
 
   it('A～G 分组只篩選表格，診間燈仍反映整個目前場次',async()=>{
+    setRoomStatuses([1,4]);
     list.mockResolvedValue([examination(),examination({id:'exam-2',participantId:'person-2',roomId:'診間 4'})]);
     await render([person(),person({id:'person-2',employeeNo:'00200',name:'B組人員',groupCode:'B',checkinNo:'B1'})]);
     expectRooms([1,4]);
@@ -152,6 +164,7 @@ describe('超音波控制台診間狀態',()=>{
   });
 
   it('檢查中診間僅取 in_progress 輪次，不取舊 completed 或較早列出的 waiting 輪次',async()=>{
+    setRoomStatuses([4]);
     list.mockResolvedValue([
       examination({id:'old-round',roundNo:1,status:'completed',roomId:'診間 1',completedAt:'2026-10-07T00:03:00Z',actualItems:['腹部超音波'],itemCount:1}),
       examination({id:'waiting-round',roundNo:3,status:'waiting',roomId:'診間 2'}),
@@ -174,9 +187,11 @@ describe('超音波控制台診間狀態',()=>{
   });
 
   it('完成檢查後釋放原診間，其他狀態的表格仍保留既有完成輪次診間',async()=>{
+    setRoomStatuses([2]);
     list.mockResolvedValueOnce([examination({roomId:'診間 2'})]);
     await render([person()]);
     expectRooms([2]);
+    setRoomStatuses();
     list.mockResolvedValueOnce([examination({roomId:'診間 2',status:'completed',completedAt:'2026-10-07T00:03:00Z',actualItems:['腹部超音波'],itemCount:1})]);
     await render([person({status:'已完成'})]);
     expectRooms();
@@ -198,6 +213,7 @@ describe('超音波控制台診間狀態',()=>{
     await until(()=>list.mock.calls.length===2);
     expect(callParticipant).toHaveBeenCalledWith('person-1');
     expect(changed).toHaveBeenCalledTimes(1);
+    setRoomStatuses([3]);
     await render([person({status:'檢查中',updatedAt:'2026-10-07T00:03:00Z'})]);
     expectRooms([3]);
     expect(roomCell()).toBe('診間3');
@@ -216,6 +232,7 @@ describe('超音波控制台診間狀態',()=>{
     list.mockResolvedValueOnce([examination({id:'next-exam',participantId:'next-person',roomId:'診間 3'})]);
     await render([person()]);
     await until(()=>list.mock.calls.length===1);
+    setRoomStatuses([3],[],nextSession.id);
     await render([person({id:'next-person',sessionId:nextSession.id,name:'新場次人員'})],nextSession);
     await until(()=>roomGroup().querySelector('[aria-label="診間3：檢查中"]')!==null);
     expectRooms([3]);
@@ -227,5 +244,39 @@ describe('超音波控制台診間狀態',()=>{
     expect(roomCell('新場次人員')).toBe('診間3');
     expect(errors).not.toHaveBeenCalled();
     expect(list.mock.calls).toEqual([['person-1'],['next-person']].map(ids=>[ids]));
+  });
+
+  it('沒有載入受檢者的診間也能依雲端 away 顯示黃燈與可見狀態文字',async()=>{
+    setRoomStatuses([], [2]);
+    await render();
+    const light=indicator(2);
+    expect(light.getAttribute('aria-label')).toBe('診間2：暫時離開');
+    expect(light.textContent).toContain('暫時離開');
+    expect(light.querySelector('[aria-hidden="true"]')?.classList.contains('bg-yellow-400')).toBe(true);
+    expect(list).toHaveBeenCalledWith([]);
+  });
+
+  it('雲端 away 優先於目前 examination 的檢查中狀態',async()=>{
+    setRoomStatuses([], [1]);
+    list.mockResolvedValue([examination()]);
+    await render([person()]);
+    expect(indicator(1).getAttribute('aria-label')).toBe('診間1：暫時離開');
+    expect(roomCell()).toBe('診間1');
+    expect(rowFor('王小明').cells[6].textContent).toBe('檢查中');
+  });
+
+  it('房態讀取失敗時為灰色未確認，重試仍可使用且全域叫號保持原功能',async()=>{
+    const retry=vi.fn(async()=>{});
+    vi.mocked(useRoomStates).mockReturnValue({rooms:[],loading:false,error:'無法確認診間狀態，請檢查網路後重試。',refresh:retry,acceptRoom:vi.fn()});
+    await render([person({status:'等候中'})]);
+    for(const room of [1,2,3,4]){
+      expect(indicator(room).getAttribute('aria-label')).toBe(`診間${room}：狀態未確認`);
+      expect(indicator(room).querySelector('[aria-hidden="true"]')?.classList.contains('bg-slate-400')).toBe(true);
+    }
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('無法確認診間狀態');
+    const button=Array.from(container.querySelectorAll('button')).find(value=>value.textContent==='重試')!;
+    await act(async()=>{button.click();});
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(Array.from(container.querySelectorAll('button')).find(value=>value.textContent==='叫號')?.disabled).toBe(false);
   });
 });

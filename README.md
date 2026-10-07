@@ -170,3 +170,25 @@ where routine_schema = 'public'
 6. 合併或推送到 `main` 後，`Deploy GitHub Pages` workflow 會先執行 typecheck、lint、test、build，全部成功才上傳 `dist` 並部署。也可在 Actions 頁面用 `workflow_dispatch` 手動重新發布。
 
 若 Actions 顯示 environment protection 等待核准，請在 **Settings → Environments → github-pages** 調整部署規則。發布完成後請用無痕視窗檢查首頁、`manifest.webmanifest`、Service Worker、`icon.svg`，並在 Android Chrome 重新安裝或更新 PWA。Supabase variables 修改後必須重新執行部署，因為 Vite 會在 build 階段寫入公開前端 bundle。
+
+## 診間「暫時離開」
+
+「超音波診間」的「開始檢查」右側新增黃色「暫時離開」按鈕；離席後變為「返回診間」。診間、控制台與報到站都從 Supabase 的正式診間狀態顯示黃燈及「暫時離開」。這是獨立的不可接人狀態，並非空閒、完成或關閉。
+
+既有 schema 沒有診間狀態欄位，因此 `202610070001_room_away.sql` 新增 `public.rooms(session_id, room_id, status, updated_at)`，以 `(session_id, room_id)` 隔離場次與診間；`status` 使用 `public.room_status` 的 `idle`、`in_progress`、`away`。沒有新增前態、病人資料或離席原因欄位。返回時從既有未完成檢查推導 `in_progress` 或 `idle`。
+
+請透過既有 Supabase migration 部署流程套用此新增 SQL，再發布相應前端；勿修改或重貼原 migration。新診間狀態表僅允許已授權工作人員讀取，寫入使用 `set_room_away(p_session_id, p_room_id, p_away)`。原開始／完成 RPC 以同一診間資料列鎖阻擋離席操作與同診間重複接人。既有進行中檢查會回填房態，清排程／刪受檢者會釋放一般診間而保留離席狀態。
+
+按下離開／返回僅修改房態，保留查詢、受檢者、歷年資料、選擇項目、原檢查時間與確認操作。切換診間時，尚在此頁面的工作畫面依場次與診間暫存，不相互覆蓋。重新整理／其他裝置重新讀取持久化房態及既有進行中檢查；未開始的完整查詢畫面不會上傳雲端。歷年資料與草稿維持原本機保存方式。
+
+`rooms` 納入 Realtime publication，控制台、報到站與診間訂閱同一場次；重連／切回畫面會重讀。讀取或同步失敗時顯示未確認狀態並阻止開始檢查。系統目前的叫號是共用候檢隊列，尚無指定診間或自動分配；實際指定診間的入口 `start_examination` 會原子排除 `away`。
+
+本次新規格取代 #30 設計。於目前取得的程式及 Git 歷史未找到 #30 實作；控制台原本以受檢者／檢查推導紅綠燈的程式已改為讀取正式診間狀態。
+
+除一般型別、測試與建置外，可用以下指令在可執行 Docker 的開發環境驗證 migration 與真實資料庫競態：
+
+```sh
+bash scripts/test-room-away-db.sh
+```
+
+此測試僅使用無對外連接埠、無網路的本機 PostgreSQL 17 暫存容器，驗證所有 migration、RLS／GRANT、房態保留、回復、追加檢查與同時開始競態；不連線正式 Supabase。正式發布後仍需兩台登入同一場次的實體平板驗收 Realtime。
