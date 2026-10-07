@@ -1,19 +1,32 @@
-import {act} from 'react';
+import {act,useReducer} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {UltrasoundRoom} from '../features/room/UltrasoundRoom';
 import type {Examination,HistoricalRecord,Participant,RoomState,Session} from '../types';
+import type {RoomClaimState} from '../features/room/useRoomClaims';
 
 type StoredRoom=RoomState;
 const remote=vi.hoisted(()=>({
   rooms:[] as StoredRoom[],roomCount:undefined as number|undefined,loading:false,error:'',refresh:vi.fn(),acceptRoom:vi.fn(),setAway:vi.fn(),
   roomExamination:vi.fn(),examinations:vi.fn(),examination:vi.fn(),restoreDraft:vi.fn(),saveDraft:vi.fn(),start:vi.fn(),complete:vi.fn(),clock:vi.fn(),
   historyById:vi.fn(),historyByEmployee:vi.fn(),stats:vi.fn(),
+  claimSession:null as string|null,claimRoom:null as string|null,claimOwned:true,claimConfirmed:true,claimLoading:false,claimBusy:false,claimError:'',claimWarning:'',otherClaims:[] as string[],claimSelect:vi.fn(),claimRefresh:vi.fn(),claimRelease:vi.fn(),claimRevoke:vi.fn(),claimInputs:vi.fn(),
 }));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:()=>({rooms:remote.rooms,roomCount:remote.roomCount,loading:remote.loading,error:remote.error,refresh:remote.refresh,acceptRoom:remote.acceptRoom})}));
 vi.mock('../features/room/service',async importOriginal=>({...await importOriginal<typeof import('../features/room/service')>(),setRoomAway:remote.setAway}));
 vi.mock('../features/examination/service',()=>({getRoomExamination:remote.roomExamination,listExaminations:remote.examinations,getExamination:remote.examination,restoreDraft:remote.restoreDraft,saveExaminationDraft:remote.saveDraft,startExamination:remote.start,completeExamination:remote.complete,cloudNow:remote.clock}));
 vi.mock('../features/history/db',()=>({findHistoryByNationalId:remote.historyById,findHistoryByEmployeeNo:remote.historyByEmployee,historyStats:remote.stats,clearHistory:vi.fn(),importHistory:vi.fn()}));
+vi.mock('../features/room/useRoomClaims',()=>({useRoomClaims:function useRoomClaims(sessionId:string|null,roomCount=4,preferred='診間 1'){
+  const[,redraw]=useReducer(value=>value+1,0);
+  remote.claimInputs(sessionId,roomCount,preferred);
+  const roomIds=Array.from({length:roomCount},(_,index)=>`診間 ${index+1}`);
+  if(remote.claimSession!==sessionId){remote.claimSession=sessionId;remote.claimRoom=sessionId?(roomIds.includes(preferred)?preferred:roomIds[0]):null;}
+  if(remote.claimRoom&&!roomIds.includes(remote.claimRoom))remote.claimRoom=roomIds[0];
+  return{roomId:remote.claimRoom,isOwned:remote.claimOwned&&Boolean(sessionId),claimConfirmed:remote.claimConfirmed&&Boolean(sessionId),loading:remote.claimLoading,busy:remote.claimBusy,error:remote.claimError,warning:remote.claimWarning,
+    allOccupied:!remote.claimOwned&&roomIds.every(roomId=>remote.otherClaims.includes(roomId)),
+    claims:roomIds.map(roomId=>({sessionId:sessionId??'',roomId,isMine:remote.claimOwned&&remote.claimRoom===roomId,isClaimed:(remote.claimOwned&&remote.claimRoom===roomId)||remote.otherClaims.includes(roomId),claimedAt:null,claimExpiresAt:null,serverNow:'2026-10-07T00:00:00Z'})),
+    selectRoom:async(roomId:string)=>{const result=await remote.claimSelect(roomId);redraw();return result;},refresh:remote.claimRefresh,release:remote.claimRelease,revoke:()=>{remote.claimRevoke();redraw();}};
+}}));
 
 const session:Session={id:'room-session',companyName:'ITRI',sessionDate:'2026-10-07',status:'active'};
 const participant=(patch:Partial<Participant>={}):Participant=>({id:'person-1',sessionId:session.id,sequence:8,employeeNo:'00125',name:'王小明',gender:'男',slot:'08:30~09:00',groupCode:'C',plannedItems:['腹部超音波','甲狀腺超音波'],checkinNo:'C8',status:'等候中',checkedInAt:'2026-10-07T00:01:00Z',calledAt:null,note:'',updatedAt:'2026-10-07T00:01:00Z',...patch});
@@ -42,6 +55,11 @@ function queryInput(){
   return element;
 }
 async function click(element:HTMLElement){await act(async()=>{element.click();});}
+function clickHandler(element:HTMLElement){
+  const property=Object.keys(element).find(key=>key.startsWith('__reactProps$'));
+  if(!property)throw new Error('找不到已註冊的操作。');
+  return(element as unknown as Record<string,{onClick:()=>void}>)[property].onClick;
+}
 async function input(element:HTMLInputElement,value:string){
   const setValue=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!;
   await act(async()=>{setValue.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});
@@ -78,6 +96,11 @@ describe('超音波診間暫時離開',()=>{
     vi.stubGlobal('matchMedia',vi.fn(()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()})));
     remote.rooms=[1,2,3,4].map(value=>roomState(`診間 ${value}`));
     remote.loading=false;remote.error='';remote.roomCount=undefined;
+    remote.claimSession=null;remote.claimRoom=null;remote.claimOwned=true;remote.claimConfirmed=true;remote.claimLoading=false;remote.claimBusy=false;remote.claimError='';remote.claimWarning='';remote.otherClaims=[];
+    for(const mock of [remote.claimSelect,remote.claimRefresh,remote.claimRelease,remote.claimRevoke,remote.claimInputs])mock.mockReset();
+    remote.claimSelect.mockImplementation(async(roomId:string)=>{if(remote.otherClaims.includes(roomId)){remote.claimError=`${roomId}目前正在其他設備使用中。`;return false;}remote.claimRoom=roomId;remote.claimOwned=true;remote.claimConfirmed=true;return true;});
+    remote.claimRefresh.mockResolvedValue(undefined);remote.claimRelease.mockResolvedValue(true);
+    remote.claimRevoke.mockImplementation(()=>{remote.claimRoom=null;remote.claimOwned=false;remote.claimConfirmed=false;remote.claimError='本機已失去此診間的使用權，請重新選擇診間。';});
     for(const mock of [remote.refresh,remote.acceptRoom,remote.setAway,remote.roomExamination,remote.examinations,remote.examination,remote.restoreDraft,remote.saveDraft,remote.start,remote.complete,remote.clock,remote.historyById,remote.historyByEmployee,remote.stats])mock.mockReset();
     remote.refresh.mockResolvedValue(undefined);
     remote.acceptRoom.mockImplementation((room:StoredRoom)=>{remote.rooms=remote.rooms.map(value=>value.sessionId===room.sessionId&&value.roomId===room.roomId?room:value);});
@@ -104,6 +127,117 @@ describe('超音波診間暫時離開',()=>{
     container.remove();
     vi.restoreAllMocks();vi.unstubAllGlobals();
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=false;
+  });
+
+  it('localStorage只提供偏好，取得雲端確認前不還原病人或允許診間操作',async()=>{
+    localStorage.setItem('itri-ultrasound-room','診間 1');
+    remote.claimOwned=false;remote.claimConfirmed=false;remote.claimLoading=true;
+    remote.roomExamination.mockResolvedValue(examination({roomId:'診間 3'}));
+    await render();
+    expect(roomSelector().value).toBe('');
+    expect(button('開始檢查').disabled).toBe(true);expect(button('暫時離開').disabled).toBe(true);expect(queryInput().disabled).toBe(true);
+    expect(remote.roomExamination).not.toHaveBeenCalled();expect(remote.historyByEmployee).not.toHaveBeenCalled();
+    expect(container.querySelector('.room-patient')).toBeNull();
+    remote.claimRoom='診間 3';remote.claimOwned=true;remote.claimConfirmed=true;remote.claimLoading=false;
+    await render();
+    expect(roomSelector().value).toBe('診間 3');
+    expect(remote.roomExamination).toHaveBeenCalledWith(session.id,'診間 3');
+    expect(container.querySelector('.room-patient-name')?.textContent).toBe('王小明');
+    expect(localStorage.getItem('itri-ultrasound-room')).toBe('診間 3');
+  });
+
+  it('App提供claim controller時停用內部claim，其他場次的舊claim不可授權目前場次',async()=>{
+    const claimState:RoomClaimState={roomId:'診間 2',isOwned:true,claimConfirmed:true,loading:false,busy:false,error:'',warning:'',allOccupied:false,
+      claims:[{sessionId:session.id,roomId:'診間 2',isMine:true,isClaimed:true,claimedAt:'2026-10-07T00:00:00Z',claimExpiresAt:'2026-10-07T00:03:00Z',serverNow:'2026-10-07T00:00:00Z'}],
+      selectRoom:vi.fn(async()=>true),refresh:vi.fn(async()=>{}),release:vi.fn(async()=>true),revoke:vi.fn()};
+    await act(async()=>{root.render(<UltrasoundRoom current={session} participants={[]} claimState={claimState}/>);});
+    expect(remote.claimInputs).toHaveBeenLastCalledWith(null,4,'診間 1');
+    expect(roomSelector().value).toBe('診間 2');expect(remote.roomExamination).toHaveBeenCalledWith(session.id,'診間 2');
+    remote.roomExamination.mockClear();
+    await act(async()=>{root.render(<UltrasoundRoom current={{...session,id:'different-session'}} participants={[]} claimState={claimState}/>);});
+    expect(roomSelector().value).toBe('');expect(button('暫時離開').disabled).toBe(true);expect(remote.roomExamination).not.toHaveBeenCalled();
+  });
+
+  it('診間選擇器標示本機與其他設備，其他設備釋放後即可選擇且不顯示設備或帳號識別',async()=>{
+    remote.otherClaims=['診間 2','診間 4'];
+    await render([]);
+    const selector=roomSelector();
+    expect(selector.options[0].textContent).toBe('診間 1（本機）');
+    expect(selector.options[1].textContent).toBe('診間 2（其他設備使用中）');
+    expect(selector.options[1].disabled).toBe(true);expect(selector.options[2].disabled).toBe(false);
+    expect(container.textContent).not.toMatch(/device_id|user_id|@itri/);
+    remote.otherClaims=[];await render([]);
+    expect(roomSelector().options[1].textContent).toBe('診間 2');expect(roomSelector().options[1].disabled).toBe(false);
+    await switchRoom('診間 2');
+    expect(roomSelector().value).toBe('診間 2');
+    expect(roomSelector().options[1].textContent).toBe('診間 2（本機）');
+    expect(remote.claimSelect).toHaveBeenCalledWith('診間 2');
+    expect(remote.claimRelease).not.toHaveBeenCalled();
+  });
+
+  it('切換遭其他設備搶先占用時保留原診間及已載入受檢者',async()=>{
+    await loadPerson();
+    remote.claimSelect.mockImplementationOnce(async()=>{remote.claimError='診間 2目前正在其他設備使用中。';return false;});
+    await switchRoom('診間 2');
+    expect(roomSelector().value).toBe('診間 1');expectPatientAndHistory();
+    expect(container.textContent).toContain('診間 2目前正在其他設備使用中。');
+    expect(button('開始檢查').disabled).toBe(false);
+    expect(remote.claimRelease).not.toHaveBeenCalled();
+  });
+
+  it('全部診間被其他設備占用時禁止查詢、選人、開始、離開與返回',async()=>{
+    remote.claimOwned=false;remote.claimConfirmed=false;remote.otherClaims=['診間 1','診間 2','診間 3','診間 4'];
+    await render();
+    expect(container.textContent).toContain('目前所有診間都正在其他設備使用中。');
+    expect(roomSelector().value).toBe('');expect(Array.from(roomSelector().options).filter(option=>option.value).every(option=>option.disabled)).toBe(true);
+    for(const label of ['開始檢查','暫時離開','查詢','身分證','工號','今日排程','展示'])expect(button(label).disabled).toBe(true);
+    await input(queryInput(),'A123456789');await click(button('暫時離開'));await click(button('開始檢查'));
+    expect(remote.historyById).not.toHaveBeenCalled();expect(remote.roomExamination).not.toHaveBeenCalled();expect(remote.start).not.toHaveBeenCalled();expect(remote.setAway).not.toHaveBeenCalled();
+  });
+
+  it('已確認租約遇到單次心跳網路警告時仍保留病人與診間使用權',async()=>{
+    await loadPerson();remote.claimWarning='診間連線暫時異常，系統將自動重試。';await render();
+    expect(container.textContent).toContain('診間連線暫時異常，系統將自動重試。');
+    expect(roomSelector().value).toBe('診間 1');expectPatientAndHistory();
+    expect(button('開始檢查').disabled).toBe(false);expect(button('暫時離開').disabled).toBe(false);
+  });
+
+  it('租約真的失去時清除檢查確認畫面與病人資料，舊事件不能完成或更改房態',async()=>{
+    remote.examination.mockResolvedValue(examination());
+    await render();await input(queryInput(),'A123456789');await click(button('完成檢查'));
+    const staleComplete=clickHandler(button('確認完成並同步雲端'));const staleAway=clickHandler(button('暫時離開'));
+    remote.claimRoom=null;remote.claimOwned=false;remote.claimConfirmed=false;remote.claimError='本機已失去此診間的使用權，請重新選擇診間。';await render();
+    expect(container.textContent).toContain('本機已失去此診間的使用權，請重新選擇診間。');
+    expect(container.querySelector('.room-patient')).toBeNull();expect(dialog()).toBeNull();expect(queryInput().value).toBe('');
+    expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('false');expect(button('開始檢查').disabled).toBe(true);expect(button('暫時離開').disabled).toBe(true);
+    await act(async()=>{staleComplete();staleAway();});
+    expect(remote.complete).not.toHaveBeenCalled();expect(remote.setAway).not.toHaveBeenCalled();
+  });
+
+  it('雲端操作明確回報claim_lost時立即撤銷使用權，不依賴下一次網路同步',async()=>{
+    remote.start.mockRejectedValueOnce({message:'room_claim_lost'});remote.claimRefresh.mockRejectedValueOnce(new Error('network failure'));
+    await loadPerson();await click(button('開始檢查'));
+    expect(remote.claimRevoke).toHaveBeenCalledTimes(1);expect(roomSelector().value).toBe('');
+    expect(container.querySelector('.room-patient')).toBeNull();expect(button('暫時離開').disabled).toBe(true);
+    expect(container.textContent).toContain('本機已失去此診間的使用權，請重新選擇診間。');
+  });
+
+  it('檢查中不能切換診間或透過展示模式釋放正式租約',async()=>{
+    remote.examination.mockResolvedValue(examination());
+    await render();await input(queryInput(),'A123456789');
+    expect(roomSelector().disabled).toBe(true);expect(button('展示').disabled).toBe(true);
+    await switchRoom('診間 2');await click(button('展示'));
+    expect(roomSelector().value).toBe('診間 1');expect(remote.claimSelect).not.toHaveBeenCalled();expect(remote.claimRelease).not.toHaveBeenCalled();
+  });
+
+  it('暫時離開與返回維持同一雲端claim，展示模式也不更改正式claim controller的場次',async()=>{
+    await loadPerson();await click(button('暫時離開'));
+    expect(roomSelector().options[0].textContent).toBe('診間 1（本機）');expect(remote.claimRelease).not.toHaveBeenCalled();
+    await click(button('返回診間'));
+    expect(roomSelector().value).toBe('診間 1');expect(remote.claimRelease).not.toHaveBeenCalled();
+    await click(button('展示'));
+    expect(remote.claimInputs.mock.calls.every(([sessionId])=>sessionId===session.id)).toBe(true);
+    expect(remote.claimRelease).not.toHaveBeenCalled();
   });
 
   it.each([3,8])('設定%s間時選擇器只提供目前有效診間，保留雲端away狀態',async roomCount=>{
@@ -188,7 +322,7 @@ describe('超音波診間暫時離開',()=>{
   it.each(['permission_denied','not_authorized'] as const)('開始檢查被拒絕時將%s轉為現場可理解的權限訊息',async reason=>{
     remote.start.mockRejectedValueOnce({code:'42501',message:reason});
     await loadPerson();await click(button('開始檢查'));
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有使用超音波診間的權限。');
     expect(container.textContent).not.toContain(reason);
     expect(container.textContent).not.toContain('無法連線至雲端');
     expectPatientAndHistory();
@@ -198,7 +332,7 @@ describe('超音波診間暫時離開',()=>{
     remote.examination.mockResolvedValue(examination());
     remote.complete.mockRejectedValueOnce({code:'42501',message:'permission_denied'});
     await render();await input(queryInput(),'A123456789');await click(button('完成檢查'));await click(button('確認完成並同步雲端'));
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有使用超音波診間的權限。');
     expect(dialog()).not.toBeNull();
     expect(container.querySelector('.room-patient-name')?.textContent).toBe('王小明');
   });
@@ -207,7 +341,7 @@ describe('超音波診間暫時離開',()=>{
     remote.rooms[0]=roomState('診間 1',status);
     remote.setAway.mockRejectedValueOnce({code:'42501',message:'not_authorized'});
     await render([]);await click(button(status==='away'?'返回診間':'暫時離開'));
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有使用超音波診間的權限。');
     expect(remote.rooms[0].status).toBe(status);
     expect(remote.acceptRoom).not.toHaveBeenCalled();
   });
@@ -215,7 +349,7 @@ describe('超音波診間暫時離開',()=>{
   it('重新載入診間資料被拒絕時呈現權限錯誤而不是網路同步失敗',async()=>{
     remote.roomExamination.mockRejectedValue({code:'42501',message:'permission_denied'});
     await render([]);
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有使用超音波診間的權限。');
     expect(container.textContent).not.toContain('permission_denied');
     expect(container.textContent).not.toContain('無法連線至雲端');
   });

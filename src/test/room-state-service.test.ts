@@ -2,6 +2,7 @@ import {beforeEach,describe,expect,it,vi} from 'vitest';
 
 const remote=vi.hoisted(()=>({from:vi.fn(),select:vi.fn(),eq:vi.fn(),order:vi.fn(),single:vi.fn(),rpc:vi.fn()}));
 vi.mock('../lib/supabase',()=>({requireSupabase:()=>({from:remote.from,rpc:remote.rpc})}));
+vi.mock('../features/room/device',()=>({getDeviceIdentity:()=>({deviceId:'device-1',claimSecret:'device-secret'})}));
 
 import {getSessionRoomCount,listRooms,setRoomAway} from '../features/room/service';
 import {canReceivePatient,DEFAULT_ROOM_COUNT,getRoomCount,getRoomIds,isRoomEnabled,isValidRoomCount,MAX_ROOM_COUNT,MIN_ROOM_COUNT,normalizeRoomId,roomStatusLabels} from '../features/room/status';
@@ -44,7 +45,7 @@ describe('診間雲端狀態',()=>{
     const response={...row,status:away?'away':'in_progress'};
     remote.rpc.mockResolvedValue({data:response,error:null});
     expect(await setRoomAway('session-1','診間 2',away)).toEqual({sessionId:'session-1',roomId:'診間 2',status:response.status,updatedAt:row.updated_at});
-    expect(remote.rpc).toHaveBeenCalledWith('set_room_away',{p_session_id:'session-1',p_room_id:'診間 2',p_away:away});
+    expect(remote.rpc).toHaveBeenCalledWith('set_room_away',{p_session_id:'session-1',p_room_id:'診間 2',p_away:away,p_device_id:'device-1',p_device_secret:'device-secret'});
   });
 
   it('只有明確 idle 可以接新受檢者，away不是空閒或關閉',()=>{

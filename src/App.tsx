@@ -24,6 +24,7 @@ import type {Participant,Session} from './types';
 import {friendlyError} from './lib/errors';
 import {canUsePage,firstAllowedPage,getAllowedPages,permissionAccessMessage,type WorkPage} from './features/auth/permissions';
 import {useStaffPermissions} from './features/auth/useStaffPermissions';
+import {useRoomClaims} from './features/room/useRoomClaims';
 import {taiwanToday} from './lib/time';
 
 export default function App(){
@@ -40,6 +41,16 @@ export default function App(){
   const access=useStaffPermissions(userId);
   const allowedPages=getAllowedPages(access.permissions);
   const effectivePage=pageOwner===userId&&canUsePage(access.permissions,page)?page:firstAllowedPage(access.permissions);
+  // Keep the lease controller outside the permission render guard. A focus
+  // check or brief connection failure must not release an otherwise valid lease.
+  const leaseContext=useRef<{userId:string;session:Session}|null>(null);
+  if(access.ready){
+    if(effectivePage==='room'&&userId){
+      if(current)leaseContext.current={userId,session:current};
+    }else leaseContext.current=null;
+  }else if(leaseContext.current?.userId!==userId||(!access.loading&&!access.error))leaseContext.current=null;
+  const leaseSession=leaseContext.current?.userId===userId?leaseContext.current.session:null;
+  const roomClaims=useRoomClaims(leaseSession?.id??null,leaseSession?.roomCount,localStorage.getItem('itri-ultrasound-room'));
   const sessionRequest=useRef(0);
   const participantRequest=useRef(0);
   const authRequest=useRef(0);
@@ -58,8 +69,9 @@ export default function App(){
     try{
       const values=await listSessions();
       if(!workAccess.current.ready||context.version!==workAccess.current.version||request!==sessionRequest.current)return;
+      if(leaseContext.current&&!values.some(value=>value.id===leaseContext.current?.session.id))leaseContext.current=null;
       setSessions(values);
-      setCurrent(previous=>values.find(x=>x.id===previous?.id)??values.find(x=>x.id===localStorage.getItem('itri-current-session'))??values[0]??null);
+      setCurrent(previous=>values.find(x=>x.id===previous?.id)??values.find(x=>x.id===leaseContext.current?.session.id)??values.find(x=>x.id===localStorage.getItem('itri-current-session'))??values[0]??null);
     }catch(error){
       if(context.version===workAccess.current.version&&workAccess.current.ready)throw error;
     }
@@ -120,7 +132,7 @@ export default function App(){
   }} busy={busy}/></Shell>;
   const header=<div className="system-user"><span>{access.permissions?.displayName||auth.user.email}</span><button disabled={busy} onClick={async()=>{
     setBusy(true);
-    try{await signOut();}
+    try{await roomClaims.release().catch(()=>false);await signOut();}
     catch(error){setNotice(friendlyError(error));}
     finally{setBusy(false);}
   }}><LogOut size={17}/>登出</button></div>;
@@ -134,6 +146,7 @@ export default function App(){
   const selectSession=(id:string)=>{
     if(!workAccess.current.ready)return;
     const next=sessions.find(x=>x.id===id)??null;
+    if(!next)leaseContext.current=null;
     activeSessionId.current=next?.id??null;participantRequest.current++;
     setParticipants([]);setCurrent(next);
   };
@@ -160,7 +173,7 @@ export default function App(){
       if(!canManageRegistration())return;await reloadSessions();if(!canManageRegistration())return;
       if(!deleted&&current)await reloadParticipants(current);
       registrationNotice(message);
-    }} setNotice={registrationNotice}/>:effectivePage==='console'?<UltrasoundConsole canRoom={access.permissions?.canRoom===true} current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)} onError={message=>setNotice('操作失敗：'+friendlyError(message))}/>:<UltrasoundRoom current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)}/>}
+    }} setNotice={registrationNotice}/>:effectivePage==='console'?<UltrasoundConsole canRoom={access.permissions?.canRoom===true} current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)} onError={message=>setNotice('操作失敗：'+friendlyError(message))}/>:<UltrasoundRoom current={current} participants={currentParticipants} claimState={roomClaims} onChanged={()=>reloadParticipants(current)}/>}
   </Shell>;
 }
 

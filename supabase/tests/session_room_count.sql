@@ -1,6 +1,70 @@
 -- Exercise production constraints/triggers/RPCs with the authenticated staff
 -- role. The runner provides a disposable local Postgres; fixtures roll back.
 begin;
+-- Test-only invoker helpers keep legacy workflow assertions on the actual
+-- credential-protected RPCs. Each (user, session, canonical room) is a separate
+-- simulated browser, so one installation never owns multiple rooms per session.
+create temporary table fixture_room_claims (
+  session_id uuid not null, room_key text not null, user_id uuid not null,
+  primary key (session_id,room_key,user_id)
+);
+grant select,insert,delete on fixture_room_claims to authenticated;
+create function pg_temp.fixture_room_key(p_room_id text)
+returns text language sql immutable as $$
+  select case when trim(p_room_id) ~ '^(診間[[:space:]]*|room_)[1-9][0-9]{0,8}$'
+    then '診間 ' || substring(trim(p_room_id) from '[0-9]+$')::integer::text
+    else trim(p_room_id) end;
+$$;
+create function pg_temp.fixture_device_id(p_session_id uuid,p_room_id text)
+returns text language sql stable as $$
+  select md5(coalesce(p_session_id::text,'missing-session') || '/' ||
+    coalesce(pg_temp.fixture_room_key(p_room_id),'invalid-room') || '/' ||
+    coalesce(auth.uid()::text,'missing-user'))::uuid::text;
+$$;
+create function pg_temp.ensure_fixture_room_claim(p_session_id uuid,p_room_id text)
+returns void language plpgsql as $$
+begin
+  if exists (select 1 from fixture_room_claims
+    where session_id=p_session_id and room_key=pg_temp.fixture_room_key(p_room_id) and user_id=auth.uid()) then return; end if;
+  perform public.claim_room(p_session_id,p_room_id,
+    pg_temp.fixture_device_id(p_session_id,p_room_id),repeat('a',64));
+  insert into fixture_room_claims values(p_session_id,pg_temp.fixture_room_key(p_room_id),auth.uid());
+end $$;
+create function pg_temp.set_room_away(p_session_id uuid,p_room_id text,p_away boolean)
+returns public.rooms language plpgsql as $$
+begin
+  perform pg_temp.ensure_fixture_room_claim(p_session_id,p_room_id);
+  return public.set_room_away(p_session_id,p_room_id,p_away,
+    pg_temp.fixture_device_id(p_session_id,p_room_id),repeat('a',64));
+end $$;
+create function pg_temp.start_examination(p_participant_id uuid,p_room_id text,p_items text[])
+returns public.examinations language plpgsql as $$
+declare session_id uuid;
+begin
+  select participants.session_id into session_id from public.participants where id=p_participant_id;
+  perform pg_temp.ensure_fixture_room_claim(session_id,p_room_id);
+  return public.start_examination(p_participant_id,p_room_id,p_items,
+    pg_temp.fixture_device_id(session_id,p_room_id),repeat('a',64));
+end $$;
+create function pg_temp.complete_examination(p_examination_id uuid,p_room_id text,p_items text[])
+returns public.examinations language plpgsql as $$
+declare session_id uuid;
+begin
+  select participants.session_id into session_id from public.participants
+    join public.examinations on examinations.participant_id=participants.id where examinations.id=p_examination_id;
+  perform pg_temp.ensure_fixture_room_claim(session_id,p_room_id);
+  return public.complete_examination(p_examination_id,p_room_id,p_items,
+    pg_temp.fixture_device_id(session_id,p_room_id),repeat('a',64));
+end $$;
+create function pg_temp.release_fixture_room_claim(p_session_id uuid,p_room_id text)
+returns void language plpgsql as $$
+begin
+  perform public.release_room_claim(p_session_id,p_room_id,
+    pg_temp.fixture_device_id(p_session_id,p_room_id),repeat('a',64));
+  delete from fixture_room_claims where session_id=p_session_id
+    and room_key=pg_temp.fixture_room_key(p_room_id) and user_id=auth.uid();
+end $$;
+
 insert into auth.users(id) values ('41111111-1111-1111-1111-111111111111');
 update public.staff_permissions set can_registration=true,can_console=true,can_room=true where user_id='41111111-1111-1111-1111-111111111111';
 create function pg_temp.assert_room_count(p_ok boolean, p_message text)
@@ -64,8 +128,8 @@ select pg_temp.expect_room_count_error($sql$select public.update_session_room_co
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',9)$sql$,'invalid_room_count');
 
 -- Increasing adds only missing rows and preserves away, occupied and timestamps.
-select public.set_room_away('42222222-2222-2222-2222-222222222224','診間2',true);
-create temporary table room_before_increase as select * from public.rooms where session_id='42222222-2222-2222-2222-222222222224';
+select pg_temp.set_room_away('42222222-2222-2222-2222-222222222224','診間2',true);
+create temporary table room_before_increase as select session_id,room_id,status,updated_at from public.rooms where session_id='42222222-2222-2222-2222-222222222224';
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',6);
 select pg_temp.assert_room_count(not exists (
   select 1 from room_before_increase old_room
@@ -79,18 +143,18 @@ select pg_temp.assert_room_count((select count(*)=6 from public.rooms where sess
 -- Safe decreases retain history rows. Older devices cannot reactivate them.
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',4);
 select pg_temp.assert_room_count((select count(*)=6 from public.rooms where session_id='42222222-2222-2222-2222-222222222224'), 'decrease keeps retained room rows');
-select pg_temp.expect_room_count_error($sql$select public.set_room_away('42222222-2222-2222-2222-222222222224','診間5',true)$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.start_examination('43333333-3333-3333-3333-333333333331','診間 5',array['腹部超音波'])$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.set_room_away('42222222-2222-2222-2222-222222222224','room_5',true)$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.start_examination('43333333-3333-3333-3333-333333333333','診間 4',array['腹部超音波'])$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.set_room_away('42222222-2222-2222-2222-222222222228','anything',true)$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.set_room_away('42222222-2222-2222-2222-222222222228','診間 9',true)$sql$,'invalid_room');
-select pg_temp.expect_room_count_error($sql$select public.start_examination('43333333-3333-3333-3333-333333333331','診間2',array['腹部超音波'])$sql$,'room_away');
+select pg_temp.expect_room_count_error($sql$select pg_temp.set_room_away('42222222-2222-2222-2222-222222222224','診間5',true)$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.start_examination('43333333-3333-3333-3333-333333333331','診間 5',array['腹部超音波'])$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.set_room_away('42222222-2222-2222-2222-222222222224','room_5',true)$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.start_examination('43333333-3333-3333-3333-333333333333','診間 4',array['腹部超音波'])$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.set_room_away('42222222-2222-2222-2222-222222222228','anything',true)$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.set_room_away('42222222-2222-2222-2222-222222222228','診間 9',true)$sql$,'invalid_room');
+select pg_temp.expect_room_count_error($sql$select pg_temp.start_examination('43333333-3333-3333-3333-333333333331','診間2',array['腹部超音波'])$sql$,'room_away');
 
 -- A removed occupied/away room is rejected transactionally. Clients cannot
 -- write room_count directly; its guard also protects administrator updates.
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',6);
-select public.start_examination('43333333-3333-3333-3333-333333333331','room_5',array['腹部超音波']);
+select pg_temp.start_examination('43333333-3333-3333-3333-333333333331','room_5',array['腹部超音波']);
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',8);
 select pg_temp.assert_room_count((select status='in_progress' from public.rooms where session_id='42222222-2222-2222-2222-222222222224' and room_id='診間 5'), 'increase after starting retains occupied status');
 select pg_temp.assert_room_count((select status='away' from public.rooms where session_id='42222222-2222-2222-2222-222222222224' and room_id='診間 2'), 'increase after starting retains away status');
@@ -101,26 +165,35 @@ reset role;
 select pg_temp.expect_room_count_error($sql$update public.health_sessions set room_count=4 where id='42222222-2222-2222-2222-222222222224'$sql$,'room_count_in_progress:診間 5');
 set local role authenticated;
 select pg_temp.assert_room_count((select room_count=6 from public.health_sessions where id='42222222-2222-2222-2222-222222222224'), 'failed shrink does not change count');
-select public.set_room_away('42222222-2222-2222-2222-222222222224','診間5',true);
+select pg_temp.set_room_away('42222222-2222-2222-2222-222222222224','診間5',true);
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',4)$sql$,'room_count_away:診間 5');
-select public.set_room_away('42222222-2222-2222-2222-222222222224','診間5',false);
+select pg_temp.set_room_away('42222222-2222-2222-2222-222222222224','診間5',false);
 create temporary table completed_history as
-select (public.complete_examination((select id from public.examinations where participant_id='43333333-3333-3333-3333-333333333331'),'診間5',array['腹部超音波'])).*;
+select (pg_temp.complete_examination((select id from public.examinations where participant_id='43333333-3333-3333-3333-333333333331'),'診間5',array['腹部超音波'])).*;
+select pg_temp.release_fixture_room_claim('42222222-2222-2222-2222-222222222224','診間5');
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',4);
 select pg_temp.assert_room_count((select count(*)=1 from public.examinations where participant_id='43333333-3333-3333-3333-333333333331' and room_id='診間 5' and status='completed'), 'decrease preserves completed examination history');
 select pg_temp.assert_room_count(
-  public.complete_examination((select id from completed_history),'診間5',array['腹部超音波'])=(select row(examinations.*)::public.examinations from public.examinations where id=(select id from completed_history)),
-  'completed examination retry remains read-only for a retained inactive room'
+  (select row(examinations.*)::public.examinations from public.examinations where id=(select id from completed_history))=(select row(completed_history.*)::public.examinations from completed_history),
+  'completed examination history remains unchanged in a retained inactive room'
 );
+-- Retained inactive rooms stay readable, but no device may mutate them through
+-- a credential-protected completion retry.
+select pg_temp.expect_room_count_error($sql$select public.complete_examination((select id from completed_history),'診間5',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$,'invalid_room');
 
 -- Defense in depth: unfinished examinations prevent a shrink even if an old
 -- administrator/device left the availability row incorrectly marked idle.
-select public.start_examination('43333333-3333-3333-3333-333333333332','診間6',array['腹部超音波']);
+select pg_temp.start_examination('43333333-3333-3333-3333-333333333332','診間6',array['腹部超音波']);
 reset role;
-update public.rooms set status='idle' where session_id='42222222-2222-2222-2222-222222222226' and room_id='診間 6';
+-- Simulate both a legacy incorrect idle status and an expired installation;
+-- the unfinished examination must independently prevent the decrease.
+update public.rooms set status='idle',
+  claimed_at=clock_timestamp()-interval '181 seconds',
+  claim_expires_at=clock_timestamp()-interval '1 second'
+where session_id='42222222-2222-2222-2222-222222222226' and room_id='診間 6';
 update public.rooms set status='in_progress' where session_id='42222222-2222-2222-2222-222222222223' and room_id='診間 2';
 set local role authenticated;
-select pg_temp.expect_room_count_error($sql$select public.start_examination('43333333-3333-3333-3333-333333333333','診間2',array['腹部超音波'])$sql$,'room_occupied');
+select pg_temp.expect_room_count_error($sql$select pg_temp.start_examination('43333333-3333-3333-3333-333333333333','診間2',array['腹部超音波'])$sql$,'room_occupied');
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222226',4)$sql$,'room_count_unfinished:診間 6');
 select pg_temp.assert_room_count((select room_count=6 from public.health_sessions where id='42222222-2222-2222-2222-222222222226'), 'unfinished examination keeps old count');
 

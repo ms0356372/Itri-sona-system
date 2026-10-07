@@ -17,6 +17,7 @@ const remote=vi.hoisted(()=>({
   createSession:vi.fn(),listExaminations:vi.fn(),downloadCheckinReport:vi.fn(),downloadUltrasoundReport:vi.fn(),
   subscribeSessions:vi.fn(),subscribeSession:vi.fn(),
   checkin:vi.fn(),console:vi.fn(),room:vi.fn(),
+  claims:vi.fn(),releaseClaim:vi.fn(),
 }));
 vi.mock('../lib/supabase',()=>{
   const client={
@@ -50,6 +51,7 @@ vi.mock('../features/roster/db',()=>({clearPreparedSchedule:vi.fn()}));
 vi.mock('../features/checkin/Checkin',()=>({Checkin:remote.checkin}));
 vi.mock('../features/console/Console',()=>({UltrasoundConsole:remote.console}));
 vi.mock('../features/room/UltrasoundRoom',()=>({UltrasoundRoom:remote.room}));
+vi.mock('../features/room/useRoomClaims',()=>({useRoomClaims:remote.claims}));
 vi.mock('../features/room/RoomStatusOverview',()=>({RoomStatusOverview:()=>null}));
 vi.mock('../features/sessions/management',()=>({clearSessionSchedule:vi.fn(),deleteSession:vi.fn()}));
 vi.mock('../features/examination/service',()=>({listExaminations:remote.listExaminations}));
@@ -123,6 +125,8 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
       remote.authListener=listener;return{data:{subscription:{unsubscribe:remote.unsubscribeAuth}}};
     });
     remote.signOut.mockImplementation(async()=>{remote.authListener?.('SIGNED_OUT',null);});
+    remote.releaseClaim.mockResolvedValue(true);
+    remote.claims.mockImplementation(()=>({roomId:'診間 1',claims:[],isOwned:true,claimConfirmed:true,loading:false,busy:false,error:'',warning:'',allOccupied:false,selectRoom:vi.fn(),refresh:vi.fn(),release:remote.releaseClaim}));
     remote.listSessions.mockResolvedValue([session()]);remote.listParticipants.mockResolvedValue([participant('今日受檢者')]);
     remote.listExaminations.mockResolvedValue([]);
     remote.subscribeSessions.mockImplementation((listener:()=>void)=>{
@@ -233,6 +237,79 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     expect(remote.sessionListeners.size).toBe(0);expect(remote.participantListeners.size).toBe(0);
     await act(async()=>{pending.reject(new Error('network down'));});
     expect(container.textContent).toContain('無法確認此帳號的系統權限');expect(activePage(container)).toBeNull();
+  });
+
+  it('focus權限確認期間隱藏業務畫面但不取消原場次租約，恢復後仍使用同一scope',async()=>{
+    const container=await mount();await click(container,'超音波診間');
+    expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    const calls=remote.claims.mock.calls.length;
+    const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
+    await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
+    expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    await act(async()=>{pending.resolve(staff());});
+    expect(activePage(container)).toBe('room');
+    expect(remote.claims.mock.calls.slice(calls).every(call=>call[0]==='session-a')).toBe(true);
+    expect(remote.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it('短暫offline不釋放原場次租約，畫面依權限守門停止顯示；重連重新確認後恢復',async()=>{
+    const container=await mount();await click(container,'超音波診間');
+    await act(async()=>{window.dispatchEvent(new Event('offline'));});
+    expect(activePage(container)).toBeNull();expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    await act(async()=>{for(const channel of remote.channels)channel.status('SUBSCRIBED');});
+    expect(activePage(container)).toBe('room');expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    expect(remote.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it('權限重讀後優先恢復目前持有租約的場次，不因另一分頁變更偏好就切房',async()=>{
+    remote.listSessions.mockResolvedValue([session(),session({id:'session-b',companyName:'另一場次',roomCount:2})]);
+    const container=await mount();await click(container,'超音波診間');
+    localStorage.setItem('itri-current-session','session-b');
+    const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
+    await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    expect(activePage(container)).toBeNull();expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    await act(async()=>{pending.resolve(staff());});
+    expect(container.querySelector('[data-session-id]')?.getAttribute('data-session-id')).toBe('session-a');
+    expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    expect(localStorage.getItem('itri-current-session')).toBe('session-a');
+  });
+
+  it.each(['none','console','inactive','missing'])('確認權限撤回為%s後取消lease scope，不持續續租',async mode=>{
+    const container=await mount();await click(container,'超音波診間');
+    remote.permissions.set('staff-1',mode==='missing'?null:staff({canRegistration:false,canConsole:mode==='console',canRoom:false,isActive:mode!=='inactive'}));
+    await emitPermissions();
+    expect(remote.claims).toHaveBeenLastCalledWith(null,undefined,null);
+    expect(activePage(container)).toBe(mode==='console'?'console':null);
+  });
+
+  it('離開診間頁或切換帳號取消舊lease scope',async()=>{
+    const container=await mount();await click(container,'超音波診間');
+    await click(container,'超音波控制台');expect(remote.claims).toHaveBeenLastCalledWith(null,undefined,null);
+    await click(container,'超音波診間');expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
+    await emitAuth('staff-2');expect(remote.claims).toHaveBeenLastCalledWith(null,undefined,null);
+    await act(async()=>{pending.resolve(staff({userId:'staff-2',canRegistration:false,canConsole:false}));});
+    expect(activePage(container)).toBe('room');
+  });
+
+  it('切換工作場次直接變更lease scope，不沿用另一場次診間',async()=>{
+    remote.listSessions.mockResolvedValue([session(),session({id:'session-b',roomCount:2})]);
+    const container=await mount();await click(container,'超音波診間');
+    const chooser=container.querySelector<HTMLSelectElement>('select[aria-label="工作場次"]')!;
+    await act(async()=>{chooser.value='session-b';chooser.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(remote.claims).toHaveBeenLastCalledWith('session-b',2,null);
+    await act(async()=>{chooser.value='';chooser.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(remote.claims).toHaveBeenLastCalledWith(null,undefined,null);
+  });
+
+  it('登出先嘗試釋放租約，檢查中無法釋放仍可登出交由TTL收回',async()=>{
+    const container=await mount();await click(container,'超音波診間');
+    const pending=deferred<boolean>();remote.releaseClaim.mockReturnValueOnce(pending.promise);
+    await click(container,'登出');expect(remote.releaseClaim).toHaveBeenCalledOnce();expect(remote.signOut).not.toHaveBeenCalled();
+    await act(async()=>{pending.resolve(false);});
+    expect(remote.signOut).toHaveBeenCalledOnce();expect(container.textContent).toContain('工作人員登入');
+    expect(remote.claims).toHaveBeenLastCalledWith(null,undefined,null);
   });
 
   it('tab focus 重讀權限，管理員停用後不再保留先前工作畫面',async()=>{

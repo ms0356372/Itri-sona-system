@@ -98,11 +98,16 @@ create temporary table permission_rpc_cases(page,statement) as values
   ('registration',$sql$select public.acknowledge_device_clear('ffffffff-ffff-ffff-ffff-ffffffffffff','fake-user-id')$sql$),
   ('console',$sql$select public.set_waiting_status('ffffffff-ffff-ffff-ffff-ffffffffffff','等候中')$sql$),
   ('console',$sql$select public.call_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
-  ('room',$sql$select public.start_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'])$sql$),
-  ('room',$sql$select public.complete_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'])$sql$),
+  ('room',$sql$select public.start_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.complete_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
   ('room',$sql$select public.enqueue_additional_examination('ffffffff-ffff-ffff-ffff-ffffffffffff',array['腹部超音波'])$sql$),
-  ('room',$sql$select public.set_room_away('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',true)$sql$),
-  ('room',$sql$select public.examination_clock()$sql$);
+  ('room',$sql$select public.set_room_away('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',true,'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.examination_clock()$sql$),
+  ('room',$sql$select public.claim_room('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1','88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.switch_room_claim('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1','診間 2','88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.heartbeat_room_claim('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1','88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.release_room_claim('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1','88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
+  ('room',$sql$select public.list_room_claims('ffffffff-ffff-ffff-ffff-ffffffffffff','88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$);
 grant select on permission_cases,permission_rpc_cases to authenticated;
 set local role authenticated;
 do $$
@@ -177,7 +182,7 @@ begin
   for rpc in select * from permission_rpc_cases loop perform pg_temp.check_rpc_gate(rpc.statement,false); end loop;
   perform pg_temp.assert_permission(not public.is_active_staff() and not public.can_use_registration() and not public.can_use_console() and not public.can_use_room(),'missing auth identity fails closed');
 end $$;
-\echo 'PASS: A-G all eight page combinations, inactive/missing users, thirteen RPC gates and direct API/RLS boundaries'
+\echo 'PASS: A-G all eight page combinations, inactive/missing users, eighteen RPC gates and direct API/RLS boundaries'
 
 -- D: registration-only can create, edit/import schedule, check in, manage the
 -- roster and clean a session, without unrestricted status/counter writes.
@@ -209,15 +214,16 @@ select pg_temp.assert_permission((select status='已叫號' and called_at is not
 -- B: room-only performs every room operation and preserves completed rounds.
 set local request.jwt.claim.sub='f0000000-0000-0000-0000-000000000002';
 select pg_temp.assert_permission(public.examination_clock() is not null,'room-only reads authoritative examination clock');
-select pg_temp.assert_permission((public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',true)).status='away','room-only can go away');
-select pg_temp.assert_permission((public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',false)).status='idle','room-only can return');
-create temporary table permission_visit as select (public.start_examination('f2000000-0000-0000-0000-000000000001','診間 1',array['腹部超音波'])).*;
+select public.claim_room('f1000000-0000-0000-0000-000000000001','診間 1','88888888-8888-8888-8888-888888888888',repeat('a',64));
+select pg_temp.assert_permission((public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',true,'88888888-8888-8888-8888-888888888888',repeat('a',64))).status='away','room-only can go away');
+select pg_temp.assert_permission((public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',false,'88888888-8888-8888-8888-888888888888',repeat('a',64))).status='idle','room-only can return');
+create temporary table permission_visit as select (public.start_examination('f2000000-0000-0000-0000-000000000001','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))).*;
 select pg_temp.assert_permission((select status='in_progress' from permission_visit),'room-only starts examination');
-select pg_temp.assert_permission((public.complete_examination((select id from permission_visit),'診間 1',array['腹部超音波'])).status='completed','room-only completes examination');
+select pg_temp.assert_permission((public.complete_examination((select id from permission_visit),'診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))).status='completed','room-only completes examination');
 select pg_temp.assert_permission((public.enqueue_additional_examination('f2000000-0000-0000-0000-000000000001',array['甲狀腺超音波'])).round_no=2,'room-only enqueues another examination round');
 truncate permission_visit;
-insert into permission_visit select (public.start_examination('f2000000-0000-0000-0000-000000000001','診間 1',array['甲狀腺超音波'])).*;
-select public.complete_examination((select id from permission_visit),'診間 1',array['甲狀腺超音波']);
+insert into permission_visit select (public.start_examination('f2000000-0000-0000-0000-000000000001','診間 1',array['甲狀腺超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))).*;
+select public.complete_examination((select id from permission_visit),'診間 1',array['甲狀腺超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64));
 select pg_temp.assert_permission((select count(*)=2 from public.examinations where participant_id='f2000000-0000-0000-0000-000000000001' and status='completed'),'additional round preserves first examination');
 \echo 'PASS: B-D actual registration-only, console-only and room-only workflows'
 
@@ -228,7 +234,7 @@ update public.staff_permissions set can_room=false,can_console=true where user_i
 set local role authenticated;
 select pg_temp.assert_permission(not public.can_use_room() and public.can_use_console(),'permission update takes effect without a new login');
 select pg_temp.assert_permission((select not can_room and can_console from public.staff_permissions),'refresh returns newly granted pages');
-select pg_temp.check_rpc_gate($sql$select public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',true)$sql$,false);
+select pg_temp.check_rpc_gate($sql$select public.set_room_away('f1000000-0000-0000-0000-000000000001','診間 1',true,'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$,false);
 reset role;
 update public.staff_permissions set can_console=false where user_id='f0000000-0000-0000-0000-000000000002';
 set local role authenticated;
@@ -258,7 +264,8 @@ select pg_temp.assert_permission(not exists(
     and p.proname not in ('is_active_staff','can_use_registration','can_use_console','can_use_room','can_access_session',
       'check_in_participant','set_waiting_status','call_participant','set_room_away','start_examination',
       'complete_examination','enqueue_additional_examination','update_session_room_count','clear_session_schedule',
-      'delete_health_session','close_health_session','acknowledge_device_clear')
+      'delete_health_session','close_health_session','acknowledge_device_clear',
+      'claim_room','switch_room_claim','heartbeat_room_claim','release_room_claim','list_room_claims')
 ),'all authenticated-callable SECURITY DEFINER functions covered by permission inventory');
 select pg_temp.assert_permission((select count(*)=4 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
   where n.nspname='public' and p.proname in ('is_active_staff','can_use_registration','can_use_console','can_use_room')
