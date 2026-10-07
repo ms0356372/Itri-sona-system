@@ -6,11 +6,11 @@ import type {Examination,HistoricalRecord,Participant,RoomState,Session} from '.
 
 type StoredRoom=RoomState;
 const remote=vi.hoisted(()=>({
-  rooms:[] as StoredRoom[],loading:false,error:'',refresh:vi.fn(),acceptRoom:vi.fn(),setAway:vi.fn(),
+  rooms:[] as StoredRoom[],roomCount:undefined as number|undefined,loading:false,error:'',refresh:vi.fn(),acceptRoom:vi.fn(),setAway:vi.fn(),
   roomExamination:vi.fn(),examinations:vi.fn(),examination:vi.fn(),restoreDraft:vi.fn(),saveDraft:vi.fn(),start:vi.fn(),complete:vi.fn(),clock:vi.fn(),
   historyById:vi.fn(),historyByEmployee:vi.fn(),stats:vi.fn(),
 }));
-vi.mock('../features/room/useRoomStates',()=>({useRoomStates:()=>({rooms:remote.rooms,loading:remote.loading,error:remote.error,refresh:remote.refresh,acceptRoom:remote.acceptRoom})}));
+vi.mock('../features/room/useRoomStates',()=>({useRoomStates:()=>({rooms:remote.rooms,roomCount:remote.roomCount,loading:remote.loading,error:remote.error,refresh:remote.refresh,acceptRoom:remote.acceptRoom})}));
 vi.mock('../features/room/service',async importOriginal=>({...await importOriginal<typeof import('../features/room/service')>(),setRoomAway:remote.setAway}));
 vi.mock('../features/examination/service',()=>({getRoomExamination:remote.roomExamination,listExaminations:remote.examinations,getExamination:remote.examination,restoreDraft:remote.restoreDraft,saveExaminationDraft:remote.saveDraft,startExamination:remote.start,completeExamination:remote.complete,cloudNow:remote.clock}));
 vi.mock('../features/history/db',()=>({findHistoryByNationalId:remote.historyById,findHistoryByEmployeeNo:remote.historyByEmployee,historyStats:remote.stats,clearHistory:vi.fn(),importHistory:vi.fn()}));
@@ -77,7 +77,7 @@ describe('超音波診間暫時離開',()=>{
     localStorage.clear();
     vi.stubGlobal('matchMedia',vi.fn(()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()})));
     remote.rooms=[1,2,3,4].map(value=>roomState(`診間 ${value}`));
-    remote.loading=false;remote.error='';
+    remote.loading=false;remote.error='';remote.roomCount=undefined;
     for(const mock of [remote.refresh,remote.acceptRoom,remote.setAway,remote.roomExamination,remote.examinations,remote.examination,remote.restoreDraft,remote.saveDraft,remote.start,remote.complete,remote.clock,remote.historyById,remote.historyByEmployee,remote.stats])mock.mockReset();
     remote.refresh.mockResolvedValue(undefined);
     remote.acceptRoom.mockImplementation((room:StoredRoom)=>{remote.rooms=remote.rooms.map(value=>value.sessionId===room.sessionId&&value.roomId===room.roomId?room:value);});
@@ -104,6 +104,61 @@ describe('超音波診間暫時離開',()=>{
     container.remove();
     vi.restoreAllMocks();vi.unstubAllGlobals();
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=false;
+  });
+
+  it.each([3,8])('設定%s間時選擇器只提供目前有效診間，保留雲端away狀態',async roomCount=>{
+    remote.rooms=Array.from({length:8},(_,index)=>roomState(`診間 ${index+1}`,index===roomCount-1?'away':'idle'));
+    await render([], {...session,roomCount});
+    expect(Array.from(roomSelector().options).map(value=>value.value)).toEqual(Array.from({length:roomCount},(_,index)=>`診間 ${index+1}`));
+    await switchRoom(`診間 ${roomCount}`);
+    expect(button('返回診間').disabled).toBe(false);
+    expect(button('開始檢查').disabled).toBe(true);
+    expect(button('查詢').disabled).toBe(true);
+  });
+
+  it('已儲存的診間超出本場次設定時直接重設為診間1，重新整理仍只載入有效房號',async()=>{
+    localStorage.setItem('itri-ultrasound-room','room_8');
+    await render([], {...session,roomCount:2});
+    expect(roomSelector().value).toBe('診間 1');
+    expect(remote.roomExamination.mock.calls.every(([,roomId])=>roomId==='診間 1')).toBe(true);
+    expect(localStorage.getItem('itri-ultrasound-room')).toBe('診間 1');
+    await act(async()=>{root.unmount();});root=createRoot(container);
+    await render([], {...session,roomCount:2});
+    expect(roomSelector().options).toHaveLength(2);
+    expect(roomSelector().value).toBe('診間 1');
+  });
+
+  it('即時減少診間後重設超範圍選取、清除受檢者及草稿，再增加時不恢復停用診間的舊畫面',async()=>{
+    remote.rooms=Array.from({length:8},(_,index)=>roomState(`診間 ${index+1}`));
+    const current={...session,roomCount:8};
+    await render([participant()],current);await switchRoom('診間 8');
+    await input(queryInput(),'A123456789');await click(button('腹部超音波'));
+    expectPatientAndHistory();
+    remote.roomCount=3;
+    await render([participant()],current);
+    expect(roomSelector().options).toHaveLength(3);
+    expect(roomSelector().value).toBe('診間 1');
+    expect(container.querySelector('.room-patient')).toBeNull();
+    expect(queryInput().value).toBe('');
+    expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('false');
+    remote.roomCount=8;await render([participant()],current);await switchRoom('診間 8');
+    expect(container.querySelector('.room-patient')).toBeNull();
+    expect(queryInput().value).toBe('');
+    expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('切換到較少診間的場次會重設目前房號及受檢者，不沿用上一場次資料',async()=>{
+    remote.rooms=Array.from({length:8},(_,index)=>roomState(`診間 ${index+1}`));
+    await render([participant()], {...session,roomCount:8});await switchRoom('診間 7');
+    await input(queryInput(),'A123456789');
+    const next:Session={...session,id:'two-room-session',roomCount:2};
+    remote.rooms=[roomState('診間 1'),roomState('診間 2')].map(value=>({...value,sessionId:next.id}));
+    await render([],next);
+    expect(roomSelector().options).toHaveLength(2);
+    expect(roomSelector().value).toBe('診間 1');
+    expect(container.querySelector('.room-patient')).toBeNull();
+    expect(queryInput().value).toBe('');
+    expect(remote.roomExamination).toHaveBeenLastCalledWith(next.id,'診間 1');
   });
 
   it('空診間的離開按鈕位於開始檢查右側，寫入正式狀態並且返回後恢復查詢',async()=>{

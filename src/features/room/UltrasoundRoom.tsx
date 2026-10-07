@@ -11,7 +11,7 @@ import {availableRoomHeight} from './viewportHeight';
 import {useRoomStates} from './useRoomStates';
 import {setRoomAway} from './service';
 import {RoomStatusBadge} from './RoomStatusBadge';
-import {normalizeRoomId} from './status';
+import {getRoomCount,getRoomIds,normalizeRoomId} from './status';
 import {formatError} from '../../lib/errors';
 
 const demoPatient:Participant={id:'demo-patient',sessionId:'demo-session',sequence:15,employeeNo:'B30040',name:'王小明（虛構）',gender:'男',slot:'07:30～08:00',groupCode:'A',plannedItems:[],checkinNo:'A15',status:'等候中',checkedInAt:new Date().toISOString(),calledAt:null,note:'',updatedAt:''};
@@ -28,8 +28,11 @@ const roomError=(error:unknown)=>{
 type RoomWorkspace={mode:'nationalId'|'employeeNo'|'list';query:string;selected:Participant|null;localPerson:{name:string;employeeNo:string}|null;records:HistoricalRecord[];items:UltrasoundItem[];expanded:UltrasoundItem[];examination:Examination|null;showTimer:boolean;clockOffset:number;confirming:boolean;actualItems:UltrasoundItem[];message:string};
 
 export function UltrasoundRoom({current,participants,onChanged=async()=>undefined}:{current:Session|null;participants:Participant[];onChanged?:()=>Promise<void>}){
-  const[room,setRoom]=useState(()=>normalizeRoomId(localStorage.getItem('itri-ultrasound-room')||'診間 1'));const[demo,setDemo]=useState(false);const[hasLocalHistory,setHasLocalHistory]=useState<boolean|null>(null);const[mode,setMode]=useState<'nationalId'|'employeeNo'|'list'>('nationalId');const[query,setQuery]=useState('');const[selected,setSelected]=useState<Participant|null>(null);const[localPerson,setLocalPerson]=useState<{name:string;employeeNo:string}|null>(null);const[records,setRecords]=useState<HistoricalRecord[]>([]);const[items,setItems]=useState<UltrasoundItem[]>([]);const[expanded,setExpanded]=useState<UltrasoundItem[]>([]);const[examination,setExamination]=useState<Examination|null>(null);const[showTimer,setShowTimer]=useState(false);const[clockOffset,setClockOffset]=useState(0);const[now,setNow]=useState(Date.now());const[confirming,setConfirming]=useState(false);const[actualItems,setActualItems]=useState<UltrasoundItem[]>([]);const[busy,setBusy]=useState(false);const[message,setMessage]=useState('');const[importOpen,setImportOpen]=useState(false);const[settingsOpen,setSettingsOpen]=useState(false);const[uiSettings,setUiSettings]=useState(loadUltrasoundUiSettings);const inputRef=useRef<HTMLInputElement>(null);const workspaceRef=useRef<HTMLElement>(null);
-  const roomStates=useRoomStates(demo?null:current?.id??null);
+  const[selectedRoom,setRoom]=useState(()=>normalizeRoomId(localStorage.getItem('itri-ultrasound-room')||'診間 1'));const[demo,setDemo]=useState(false);const[hasLocalHistory,setHasLocalHistory]=useState<boolean|null>(null);const[mode,setMode]=useState<'nationalId'|'employeeNo'|'list'>('nationalId');const[query,setQuery]=useState('');const[selected,setSelected]=useState<Participant|null>(null);const[localPerson,setLocalPerson]=useState<{name:string;employeeNo:string}|null>(null);const[records,setRecords]=useState<HistoricalRecord[]>([]);const[items,setItems]=useState<UltrasoundItem[]>([]);const[expanded,setExpanded]=useState<UltrasoundItem[]>([]);const[examination,setExamination]=useState<Examination|null>(null);const[showTimer,setShowTimer]=useState(false);const[clockOffset,setClockOffset]=useState(0);const[now,setNow]=useState(Date.now());const[confirming,setConfirming]=useState(false);const[actualItems,setActualItems]=useState<UltrasoundItem[]>([]);const[busy,setBusy]=useState(false);const[message,setMessage]=useState('');const[importOpen,setImportOpen]=useState(false);const[settingsOpen,setSettingsOpen]=useState(false);const[uiSettings,setUiSettings]=useState(loadUltrasoundUiSettings);const inputRef=useRef<HTMLInputElement>(null);const workspaceRef=useRef<HTMLElement>(null);
+  const roomStates=useRoomStates(demo?null:current?.id??null,current?.roomCount);
+  const roomCount=getRoomCount(roomStates.roomCount??current?.roomCount);
+  const roomIds=getRoomIds(roomCount);
+  const room=roomIds.includes(selectedRoom)?selectedRoom:roomIds[0];
   const operationPending=useRef(false);
   const[demoAway,setDemoAway]=useState<Record<string,boolean>>({});
   const[loadedWorkspace,setLoadedWorkspace]=useState('');
@@ -47,6 +50,11 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
   const unavailable=!demo&&(!current||roomStates.loading||Boolean(roomStates.error)||!status);
   const locked=examination?.status==='in_progress'&&examination.roomId===room;
   const patientActionsDisabled=busy||away||unavailable||restoring||loadedWorkspace!==workspaceKey;
+  useEffect(()=>{
+    if(selectedRoom!==room)setRoom(room);
+    const prefix=`${demo?'demo':current?.id??'none'}:`;
+    for(const key of workspaces.current.keys())if(key.startsWith(prefix)&&!getRoomIds(roomCount).includes(key.slice(prefix.length)))workspaces.current.delete(key);
+  },[room,selectedRoom,roomCount,demo,current?.id]);
   useEffect(()=>{
     if(loadedWorkspace!==workspaceKey)return;
     workspaces.current.set(workspaceKey,{mode,query,selected,localPerson,records,items,expanded,examination,showTimer,clockOffset,confirming,actualItems,message});
@@ -88,9 +96,10 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
     return()=>{cancelled=true;invalidateSelection();};
   },[workspaceKey,demo,current?.id,room,applyExamination,invalidateSelection]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{
+    if(loadedWorkspace!==workspaceKey)return;
     const person=participants.find(p=>p.id===(selected?.id??examination?.participantId));
     if(person&&person!==selected)setSelected(person);
-  },[participants,selected,examination?.participantId]);
+  },[participants,selected,examination?.participantId,loadedWorkspace,workspaceKey]);
   // Reconcile other tablets' examination changes without resetting an unchanged patient's workspace.
   useEffect(()=>{
     if(demo||!current||loadedWorkspace!==workspaceKey||restoring)return;
@@ -194,7 +203,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
     <header className="room-toolbar">
       <div className="room-toolbar-primary">
         <div className="room-toolbar-identity"><h2>超音波診間</h2><span aria-hidden="true">｜</span><p>{current?.companyName??(demo?'XX 公司（虛構展示）':'尚未選擇場次')}｜{(current?.sessionDate??new Date().toISOString().slice(0,10)).replaceAll('-','/')}</p><span aria-hidden="true">｜</span></div>
-        <label className="room-selector"><span>診間</span><select disabled={locked||busy} className="input border-teal-600 text-slate-900 disabled:opacity-60" value={room} onChange={e=>setRoom(e.target.value)}>{[1,2,3,4].map(x=><option key={x}>診間 {x}</option>)}</select></label>
+        <label className="room-selector"><span>診間</span><select disabled={locked||busy} className="input border-teal-600 text-slate-900 disabled:opacity-60" value={room} onChange={e=>setRoom(e.target.value)}>{roomIds.map(roomId=><option key={roomId} value={roomId}>{roomId}</option>)}</select></label>
         <div className="room-start-actions">
           <button disabled={patientActionsDisabled||examination?.status==='in_progress'||examination?.status==='completed'||!selected||!items.length} className="room-start-button primary disabled:opacity-40" onClick={()=>void begin()}><Play size={18}/>開始檢查</button>
           <button disabled={busy||unavailable||restoring} aria-pressed={away} className={`room-away-button${away?' is-away':''}`} onClick={()=>void toggleAway()}>{away?<ArrowLeft size={18}/>:<Pause size={18}/>}<span>{away?'返回診間':'暫時離開'}</span></button>
