@@ -185,6 +185,49 @@ describe('超音波診間暫時離開',()=>{
     expect(queryInput().disabled).toBe(false);
   });
 
+  it.each(['permission_denied','not_authorized'] as const)('開始檢查被拒絕時將%s轉為現場可理解的權限訊息',async reason=>{
+    remote.start.mockRejectedValueOnce({code:'42501',message:reason});
+    await loadPerson();await click(button('開始檢查'));
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.textContent).not.toContain(reason);
+    expect(container.textContent).not.toContain('無法連線至雲端');
+    expectPatientAndHistory();
+  });
+
+  it('完成檢查被拒絕時顯示權限訊息並保留檢查確認視窗',async()=>{
+    remote.examination.mockResolvedValue(examination());
+    remote.complete.mockRejectedValueOnce({code:'42501',message:'permission_denied'});
+    await render();await input(queryInput(),'A123456789');await click(button('完成檢查'));await click(button('確認完成並同步雲端'));
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(dialog()).not.toBeNull();
+    expect(container.querySelector('.room-patient-name')?.textContent).toBe('王小明');
+  });
+
+  it.each(['idle','away'] as const)('診間%s時離開或返回被拒絕，清楚顯示權限訊息而不更新房態',async status=>{
+    remote.rooms[0]=roomState('診間 1',status);
+    remote.setAway.mockRejectedValueOnce({code:'42501',message:'not_authorized'});
+    await render([]);await click(button(status==='away'?'返回診間':'暫時離開'));
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(remote.rooms[0].status).toBe(status);
+    expect(remote.acceptRoom).not.toHaveBeenCalled();
+  });
+
+  it('重新載入診間資料被拒絕時呈現權限錯誤而不是網路同步失敗',async()=>{
+    remote.roomExamination.mockRejectedValue({code:'42501',message:'permission_denied'});
+    await render([]);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('此帳號沒有執行此功能的權限。');
+    expect(container.textContent).not.toContain('permission_denied');
+    expect(container.textContent).not.toContain('無法連線至雲端');
+  });
+
+  it('沒有選擇場次時顯示共用選場提示並禁止雲端診間操作',async()=>{
+    await render([],null);
+    expect(container.textContent).toContain('請先選擇場次。');
+    expect(button('開始檢查').disabled).toBe(true);
+    expect(button('暫時離開').disabled).toBe(true);
+    expect(remote.roomExamination).not.toHaveBeenCalled();
+  });
+
   it('已載入受檢者的歷年資料與選取項目保留，返回後從同一受檢者開始檢查',async()=>{
     await loadPerson();
     expect(button('開始檢查').disabled).toBe(false);

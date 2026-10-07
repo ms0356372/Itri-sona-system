@@ -21,38 +21,146 @@ import {listExaminations} from './features/examination/service';
 import {downloadCheckinReport,downloadUltrasoundReport} from './features/export/sessionExport';
 import {buildCheckinReport} from './features/export/statistics';
 import type {Participant,Session} from './types';
-import {formatError,formatRoomCountError} from './lib/errors';
+import {friendlyError} from './lib/errors';
+import {canUsePage,firstAllowedPage,getAllowedPages,permissionAccessMessage,type WorkPage} from './features/auth/permissions';
+import {useStaffPermissions} from './features/auth/useStaffPermissions';
 import {taiwanToday} from './lib/time';
 
-const friendlyError=(value:unknown)=>{const message=formatError(value);if(/room_count|session_read_only|room_not_enabled/.test(message))return formatRoomCountError(value);if(/invalid login credentials/i.test(message))return 'Email 或密碼不正確。';if(/email not confirmed/i.test(message))return '此帳號尚未完成 Email 驗證。';if(/failed to fetch|network/i.test(message))return '無法連線至雲端，請檢查網路後重試。';return message||'操作失敗，請稍後再試。';};
-
 export default function App(){
-  const[auth,setAuth]=useState<AuthSession|null>(null);const[checking,setChecking]=useState(true);const[sessions,setSessions]=useState<Session[]>([]);const[current,setCurrent]=useState<Session|null>(null);const[participants,setParticipants]=useState<Participant[]>([]);const[notice,setNotice]=useState('');const[busy,setBusy]=useState(false);const[page,setPage]=useState<'registration'|'console'|'room'>('registration');
+  const[auth,setAuth]=useState<AuthSession|null>(null);
+  const[checking,setChecking]=useState(true);
+  const[sessions,setSessions]=useState<Session[]>([]);
+  const[current,setCurrent]=useState<Session|null>(null);
+  const[participants,setParticipants]=useState<Participant[]>([]);
+  const[notice,setNotice]=useState('');
+  const[busy,setBusy]=useState(false);
+  const[page,setPage]=useState<WorkPage>('registration');
+  const[pageOwner,setPageOwner]=useState<string|null>(null);
+  const userId=auth?.user.id??null;
+  const access=useStaffPermissions(userId);
+  const allowedPages=getAllowedPages(access.permissions);
+  const effectivePage=pageOwner===userId&&canUsePage(access.permissions,page)?page:firstAllowedPage(access.permissions);
   const sessionRequest=useRef(0);
   const participantRequest=useRef(0);
+  const authRequest=useRef(0);
   const activeSessionId=useRef(current?.id??null);activeSessionId.current=current?.id??null;
-  const reloadSessions=useCallback(async()=>{const request=++sessionRequest.current;const values=await listSessions();if(request!==sessionRequest.current)return;setSessions(values);setCurrent(previous=>values.find(x=>x.id===previous?.id)??values.find(x=>x.id===localStorage.getItem('itri-current-session'))??values[0]??null);},[]);
-  const reloadParticipants=useCallback(async(session=current)=>{if((session?.id??null)!==activeSessionId.current)return;const request=++participantRequest.current;const values=session?await listParticipants(session.id):[];if(request===participantRequest.current&&(session?.id??null)===activeSessionId.current)setParticipants(values);},[current]);
-  useEffect(()=>{if(!supabase){setChecking(false);return;}supabase.auth.getSession().then(({data})=>{setAuth(data.session);setChecking(false);});const{data:{subscription}}=supabase.auth.onAuthStateChange((_event,next)=>{setAuth(next);if(!next){setSessions([]);setCurrent(null);setParticipants([]);}});return()=>subscription.unsubscribe();},[]);
-  useEffect(()=>{if(auth)reloadSessions().catch(e=>setNotice(friendlyError(e)));},[auth,reloadSessions]);
+  const accessKey=[userId,access.ready,access.permissions?.canRegistration,access.permissions?.canConsole,access.permissions?.canRoom].join(':');
+  const workAccess=useRef({key:accessKey,userId,ready:access.ready,permissions:access.permissions,version:0});
+  if(workAccess.current.key!==accessKey){
+    workAccess.current={key:accessKey,userId,ready:access.ready,permissions:access.permissions,version:workAccess.current.version+1};
+    sessionRequest.current++;participantRequest.current++;
+  }
+
+  const reloadSessions=useCallback(async()=>{
+    const context=workAccess.current;
+    if(!context.ready)return;
+    const request=++sessionRequest.current;
+    try{
+      const values=await listSessions();
+      if(!workAccess.current.ready||context.version!==workAccess.current.version||request!==sessionRequest.current)return;
+      setSessions(values);
+      setCurrent(previous=>values.find(x=>x.id===previous?.id)??values.find(x=>x.id===localStorage.getItem('itri-current-session'))??values[0]??null);
+    }catch(error){
+      if(context.version===workAccess.current.version&&workAccess.current.ready)throw error;
+    }
+  },[]);
+  const reloadParticipants=useCallback(async(session=current)=>{
+    const context=workAccess.current;
+    if(!context.ready||(session?.id??null)!==activeSessionId.current)return;
+    const request=++participantRequest.current;
+    try{
+      const values=session?await listParticipants(session.id):[];
+      if(workAccess.current.ready&&context.version===workAccess.current.version&&request===participantRequest.current&&(session?.id??null)===activeSessionId.current)setParticipants(values);
+    }catch(error){
+      if(context.version===workAccess.current.version&&workAccess.current.ready&&(session?.id??null)===activeSessionId.current)throw error;
+    }
+  },[current]);
+
   useEffect(()=>{
-    if(!auth)return;
-    const reload=()=>void reloadSessions().catch(e=>setNotice(friendlyError(e)));
+    if(!supabase){setChecking(false);return;}
+    let active=true;
+    const generation=authRequest.current;
+    void supabase.auth.getSession().then(({data})=>{
+      if(active&&generation===authRequest.current){setAuth(data.session);setChecking(false);}
+    }).catch(error=>{if(active&&generation===authRequest.current){setChecking(false);setNotice(friendlyError(error));}});
+    const{data:{subscription}}=supabase.auth.onAuthStateChange((_event,next)=>{
+      authRequest.current++;
+      if(active){setAuth(next);setChecking(false);}
+    });
+    return()=>{active=false;subscription.unsubscribe();};
+  },[]);
+  useEffect(()=>{
+    if(!access.ready){setSessions([]);setCurrent(null);setParticipants([]);setNotice('');}
+  },[access.ready,userId]);
+  useEffect(()=>{
+    if(access.ready&&effectivePage){setPage(effectivePage);setPageOwner(userId);}
+  },[access.ready,effectivePage,userId]);
+  useEffect(()=>{
+    if(access.ready)void reloadSessions().catch(error=>setNotice(friendlyError(error)));
+  },[access.ready,userId,reloadSessions]);
+  useEffect(()=>{
+    if(!access.ready)return;
+    const reload=()=>void reloadSessions().catch(error=>setNotice(friendlyError(error)));
     const unsubscribe=subscribeSessions(reload);
-    const visible=()=>{if(document.visibilityState==='visible')reload();};
-    window.addEventListener('focus',reload);document.addEventListener('visibilitychange',visible);
-    return()=>{unsubscribe();window.removeEventListener('focus',reload);document.removeEventListener('visibilitychange',visible);};
-  },[auth,reloadSessions]);
-  useEffect(()=>{if(auth&&current)reloadParticipants(current).catch(e=>setNotice(friendlyError(e)));else setParticipants([]);},[auth,current,reloadParticipants]);
-  useEffect(()=>{if(current)localStorage.setItem('itri-current-session',current.id);},[current]);
-  useEffect(()=>current?subscribeSession(current.id,()=>void reloadParticipants(current)):undefined,[current,reloadParticipants]);
+    return unsubscribe;
+  },[access.ready,userId,reloadSessions]);
+  useEffect(()=>{
+    if(access.ready&&current)void reloadParticipants(current).catch(error=>setNotice(friendlyError(error)));
+    else setParticipants([]);
+  },[access.ready,userId,current,reloadParticipants]);
+  useEffect(()=>{if(access.ready&&current)localStorage.setItem('itri-current-session',current.id);},[access.ready,current]);
+  useEffect(()=>access.ready&&current?subscribeSession(current.id,()=>void reloadParticipants(current).catch(error=>setNotice(friendlyError(error)))):undefined,[access.ready,userId,current,reloadParticipants]);
+
   if(checking)return <Shell><div className="grid min-h-[60vh] place-items-center text-slate-500">正在確認登入狀態…</div></Shell>;
-  if(!auth)return <Shell><Login onLogin={async(email,password)=>{setBusy(true);try{const{data,error}=await signIn(email,password);if(error)throw error;setAuth(data.session);setNotice('登入成功。');}catch(e){throw new Error(friendlyError(e));}finally{setBusy(false);}}} busy={busy}/></Shell>;
-  const selectSession=(id:string)=>{const next=sessions.find(x=>x.id===id)??null;activeSessionId.current=next?.id??null;participantRequest.current++;setParticipants([]);setCurrent(next);};
-  const currentParticipants=participants.filter(person=>person.sessionId===current?.id);
-  return <Shell room={page==='room'} navigation={<nav className="system-navigation" aria-label="工作站導覽"><button className={page==='registration'?'is-active':''} onClick={()=>setPage('registration')}>健檢報到站</button><button className={page==='console'?'is-active':''} onClick={()=>setPage('console')}>超音波控制台</button><button className={page==='room'?'is-active':''} onClick={()=>setPage('room')}>超音波診間</button></nav>} header={<div className="system-user"><span>{auth.user.email}</span><button onClick={async()=>{setBusy(true);try{await signOut();}finally{setBusy(false);}}}><LogOut size={17}/>登出</button></div>}>
+  if(!auth)return <Shell><Login onLogin={async(email,password)=>{
+    setBusy(true);
+    try{const{data,error}=await signIn(email,password);if(error)throw error;setAuth(data.session);}
+    catch(error){throw new Error(friendlyError(error));}
+    finally{setBusy(false);}
+  }} busy={busy}/></Shell>;
+  const header=<div className="system-user"><span>{access.permissions?.displayName||auth.user.email}</span><button disabled={busy} onClick={async()=>{
+    setBusy(true);
+    try{await signOut();}
+    catch(error){setNotice(friendlyError(error));}
+    finally{setBusy(false);}
+  }}><LogOut size={17}/>登出</button></div>;
+  if(!access.ready||!effectivePage)return <Shell header={header}>
+    <div role={access.loading?'status':'alert'} className="mx-auto mt-10 max-w-xl rounded-2xl bg-white p-6 text-center font-bold text-slate-700">
+      {access.loading?'正在確認系統權限…':access.error||permissionAccessMessage(access.permissions)}
+    </div>
     {notice&&<Notice text={notice} clear={()=>setNotice('')}/>}
-    {page==='registration'?<Registration authId={auth.user.id} sessions={sessions} current={current} participants={currentParticipants} onSelect={selectSession} onCreated={async session=>{await reloadSessions();setCurrent(session);setNotice('場次建立成功。');}} onImported={async message=>{await reloadParticipants();setNotice(message);}} onCheckedIn={async()=>{await reloadParticipants();}} onManaged={async(deleted,message)=>{await reloadSessions();if(!deleted&&current)await reloadParticipants(current);setNotice(message);}} setNotice={setNotice}/>:page==='console'?<UltrasoundConsole current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)} onError={message=>setNotice(`操作失敗：${friendlyError(message)}`)}/>:<UltrasoundRoom current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)}/>}
+  </Shell>;
+
+  const selectSession=(id:string)=>{
+    if(!workAccess.current.ready)return;
+    const next=sessions.find(x=>x.id===id)??null;
+    activeSessionId.current=next?.id??null;participantRequest.current++;
+    setParticipants([]);setCurrent(next);
+  };
+  const canManageRegistration=()=>workAccess.current.ready&&workAccess.current.userId===userId&&canUsePage(workAccess.current.permissions,'registration');
+  const registrationNotice=(message:string)=>{if(canManageRegistration())setNotice(message);};
+  const currentParticipants=participants.filter(person=>person.sessionId===current?.id);
+  const labels:Record<WorkPage,string>={registration:'健檢報到站',console:'超音波控制台',room:'超音波診間'};
+  return <Shell room={effectivePage==='room'} navigation={<nav className="system-navigation" aria-label="工作站導覽">
+    {allowedPages.map(value=><button key={value} className={effectivePage===value?'is-active':''} onClick={()=>{if(canUsePage(access.permissions,value))setPage(value);}}>{labels[value]}</button>)}
+  </nav>} header={header}>
+    {notice&&<Notice text={notice} clear={()=>setNotice('')}/>}
+    {effectivePage!=='registration'&&<label className="mb-3 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-700">
+      工作場次<select className="input min-h-10 w-auto max-w-full" aria-label="工作場次" value={current?.id??''} onChange={event=>selectSession(event.target.value)}>
+        <option value="">選擇場次</option>
+        {sessions.map(value=><option key={value.id} value={value.id}>{value.sessionDate}｜{value.companyName}</option>)}
+      </select>
+    </label>}
+    {effectivePage==='registration'?<Registration authId={auth.user.id} sessions={sessions} current={current} participants={currentParticipants} onSelect={selectSession} onCreated={async session=>{
+      if(!canManageRegistration())return;
+      await reloadSessions();
+      if(!canManageRegistration())return;
+      setCurrent(session);setNotice('場次建立成功。');
+    }} onImported={async message=>{if(!canManageRegistration())return;await reloadParticipants();registrationNotice(message);}} onCheckedIn={async()=>{if(canManageRegistration())await reloadParticipants();}} onManaged={async(deleted,message)=>{
+      if(!canManageRegistration())return;await reloadSessions();if(!canManageRegistration())return;
+      if(!deleted&&current)await reloadParticipants(current);
+      registrationNotice(message);
+    }} setNotice={registrationNotice}/>:effectivePage==='console'?<UltrasoundConsole canRoom={access.permissions?.canRoom===true} current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)} onError={message=>setNotice('操作失敗：'+friendlyError(message))}/>:<UltrasoundRoom current={current} participants={currentParticipants} onChanged={()=>reloadParticipants(current)}/>}
   </Shell>;
 }
 
@@ -67,8 +175,9 @@ function Registration({authId,sessions,current,participants,onSelect,onCreated,o
   return <section className="registration-workspace"><div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><h2 className="text-2xl font-black">健檢報到站</h2><p className="mt-1 text-base font-bold text-teal-900">{current?`${current.companyName} ｜ ${current.sessionDate.replaceAll('-','/')} ｜ 今日排程 ${participants.length} 人`:'尚未選擇今日場次'}</p></div><div className="flex gap-2"><button className="secondary" onClick={()=>setView('sessions')}><Settings size={18}/>場次管理</button><button className="secondary" onClick={()=>setView('roster')}><ClipboardList size={18}/>名單管理</button></div></div>{current&&<RoomStatusOverview sessionId={current.id} roomCount={current.roomCount}/>}<Checkin key={current?.id??'no-session'} current={current} participants={participants} onSuccess={onCheckedIn} setNotice={setNotice}/></section>
 }
 function SessionExportPanel({session,participants,setNotice}:{session:Session;participants:Participant[];setNotice:(message:string)=>void}){
-  const[exporting,setExporting]=useState<'checkin'|'ultrasound'|null>(null);const report=buildCheckinReport(participants);
-  const run=async(kind:'checkin'|'ultrasound')=>{setExporting(kind);try{const freshParticipants=await listParticipants(session.id);if(kind==='checkin'){downloadCheckinReport(session,freshParticipants);setNotice('今日報到狀況 Excel 已完成下載。');return;}const examinations=await listExaminations(freshParticipants.map(person=>person.id));if(!examinations.length){setNotice('此場次目前尚無超音波檢查紀錄。');return;}downloadUltrasoundReport(session,freshParticipants,examinations);const inProgress=examinations.filter(item=>item.status==='in_progress').length;setNotice(inProgress?`今日超音波狀況 Excel 已完成下載；目前仍有 ${inProgress} 人檢查中，完成統計僅計入已完成檢查。`:'今日超音波狀況 Excel 已完成下載。');}catch(error){setNotice(`匯出失敗：${friendlyError(error)}`);}finally{setExporting(null);}};
+  const[exporting,setExporting]=useState<'checkin'|'ultrasound'|null>(null);const report=buildCheckinReport(participants);const exportActive=useRef(true);
+  useEffect(()=>{exportActive.current=true;return()=>{exportActive.current=false;};},[]);
+  const run=async(kind:'checkin'|'ultrasound')=>{setExporting(kind);try{const freshParticipants=await listParticipants(session.id);if(!exportActive.current)return;if(kind==='checkin'){downloadCheckinReport(session,freshParticipants);setNotice('今日報到狀況 Excel 已完成下載。');return;}const examinations=await listExaminations(freshParticipants.map(person=>person.id));if(!exportActive.current)return;if(!examinations.length){setNotice('此場次目前尚無超音波檢查紀錄。');return;}downloadUltrasoundReport(session,freshParticipants,examinations);const inProgress=examinations.filter(item=>item.status==='in_progress').length;setNotice(inProgress?`今日超音波狀況 Excel 已完成下載；目前仍有 ${inProgress} 人檢查中，完成統計僅計入已完成檢查。`:'今日超音波狀況 Excel 已完成下載。');}catch(error){if(exportActive.current)setNotice(`匯出失敗：${friendlyError(error)}`);}finally{if(exportActive.current)setExporting(null);}};
   return <div className="space-y-4"><dl className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-3"><Stat label="公司名稱" value={session.companyName}/><Stat label="健檢日期" value={session.sessionDate}/><Stat label="今日排程" value={`${participants.length} 人`}/><Stat label="已報到" value={`${report.checkedIn.length} 人`}/><Stat label="未報到" value={`${report.notCheckedIn.length} 人`}/><Stat label="已完成超音波" value={`${participants.filter(person=>person.status==='已完成').length} 人`}/><Stat label="超音波診間" value={`${getRoomCount(session.roomCount)}間`}/><Stat label="場次狀態" value={session.status}/></dl><div className="rounded-xl border border-teal-100 p-4"><h4 className="mb-3 font-black"><FileSpreadsheet className="mr-2 inline text-teal-700" size={20}/>資料匯出</h4><div className="grid gap-2"><button className="primary w-full disabled:opacity-50" disabled={exporting!==null} onClick={()=>void run('checkin')}><FileSpreadsheet size={18}/>{exporting==='checkin'?'正在整理 Excel……':'匯出今日報到狀況'}</button><button className="secondary w-full disabled:opacity-50" disabled={exporting!==null} onClick={()=>void run('ultrasound')}><FileSpreadsheet size={18}/>{exporting==='ultrasound'?'正在整理 Excel……':'匯出今日超音波狀況'}</button></div></div></div>;
 }
 function ManagementHeader({title,onBack}:{title:string;onBack:()=>void}){return <header className="mb-5 flex items-center gap-4 border-b border-slate-200 pb-4"><button className="secondary" onClick={onBack}><ArrowLeft size={19}/>返回報到站</button><div><h2 className="text-2xl font-black">{title}</h2><p className="text-sm text-slate-500">管理作業完成後，可返回現場工作畫面。</p></div></header>}

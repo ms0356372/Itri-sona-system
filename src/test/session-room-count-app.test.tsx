@@ -4,13 +4,25 @@ import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import type {Participant,Session} from '../types';
 
 const remote=vi.hoisted(()=>({
+  permissions:{userId:'staff-1',loginEmail:'staff@example.test',displayName:'',canRegistration:true,canConsole:true,canRoom:true,isActive:true},
   sessions:[] as Session[],listeners:new Set<()=>void>(),
   getSession:vi.fn(),onAuthStateChange:vi.fn(),unsubscribeAuth:vi.fn(),
   listSessions:vi.fn(),createSession:vi.fn(),updateSessionRoomCount:vi.fn(),listParticipants:vi.fn(),
   subscribeSession:vi.fn(),subscribeSessions:vi.fn(),unsubscribeSessions:vi.fn(),
 }));
-vi.mock('../lib/supabase',()=>({isSupabaseConfigured:true,supabase:{auth:{getSession:remote.getSession,onAuthStateChange:remote.onAuthStateChange}}}));
+vi.mock('../lib/supabase',()=>{
+  const client={
+    auth:{getSession:remote.getSession,onAuthStateChange:remote.onAuthStateChange},
+    channel:()=>{const channel={on:()=>channel,subscribe:()=>channel};return channel;},
+    removeChannel:vi.fn(),
+  };
+  return{isSupabaseConfigured:true,supabase:client,requireSupabase:()=>client};
+});
 vi.mock('../features/auth/service',()=>({signIn:vi.fn(),signOut:vi.fn()}));
+vi.mock('../features/auth/permissions',async importOriginal=>({
+  ...await importOriginal<typeof import('../features/auth/permissions')>(),
+  getStaffPermissions:async()=>remote.permissions,
+}));
 vi.mock('../features/sessions/service',()=>({listSessions:remote.listSessions,createSession:remote.createSession,updateSessionRoomCount:remote.updateSessionRoomCount}));
 vi.mock('../features/schedule/service',()=>({listParticipants:remote.listParticipants}));
 vi.mock('../features/sync/realtime',()=>({subscribeSession:remote.subscribeSession,subscribeSessions:remote.subscribeSessions}));
@@ -230,6 +242,8 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     expect(remote.updateSessionRoomCount).not.toHaveBeenCalled();
     remote.sessions[0].roomCount=3;
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    expect(currentCount(container)).toBe('3');await manage(container);
     expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：3間');
+    expect(container.querySelector<HTMLFormElement>('form')?.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true);
   });
 });

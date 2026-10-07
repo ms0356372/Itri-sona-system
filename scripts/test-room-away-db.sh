@@ -27,8 +27,9 @@ psql_local() {
 psql_local >/dev/null <<'SQL'
 create role anon nologin;
 create role authenticated nologin;
+create role service_role nologin bypassrls;
 create schema auth;
-create table auth.users (id uuid primary key);
+create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb not null default '{}');
 create function auth.uid() returns uuid language sql stable as $$
   select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
 $$;
@@ -67,6 +68,26 @@ insert into public.participants(id,session_id,sequence_no,employee_no,full_name,
 values('cccccccc-cccc-cccc-cccc-cccccccccccd','bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',2,'legacy5','Legacy5','08:00','A','檢查中','A2',clock_timestamp());
 insert into public.examinations(id,participant_id,round_no,room_id,started_at,selected_items,status)
 values('dddddddd-dddd-dddd-dddd-ddddddddddde','cccccccc-cccc-cccc-cccc-cccccccccccd',1,'room_5',clock_timestamp(),array['腹部超音波'],'in_progress');
+SQL
+  fi
+  if [[ "$migration" == *202610070003_staff_page_permissions.sql ]]; then
+    # These accounts existed before the migration. Preserve a completed visit
+    # and a six-room historical session to prove the permission backfill does
+    # not rewrite business or local-history data.
+    psql_local >/dev/null <<'SQL'
+insert into auth.users(id,email) values
+  ('a0000000-0000-0000-0000-000000000001','legacy.staff@itri.example.com'),
+  ('a0000000-0000-0000-0000-000000000002',null);
+insert into public.health_sessions(id,session_date,company_name,created_by,room_count)
+values('a1000000-0000-0000-0000-000000000001',(clock_timestamp() at time zone 'Asia/Taipei')::date-1,'permission legacy history','a0000000-0000-0000-0000-000000000001',6);
+insert into public.participants(id,session_id,sequence_no,employee_no,full_name,schedule_slot,group_code,status,checkin_no,checked_in_at)
+values('a2000000-0000-0000-0000-000000000001','a1000000-0000-0000-0000-000000000001',1,'historic','Historic','08:00','A','已完成','A1','2020-01-01T00:00:00Z');
+insert into public.examinations(id,participant_id,round_no,room_id,started_at,completed_at,duration_seconds,selected_items,actual_items,item_count,status)
+values('a3000000-0000-0000-0000-000000000001','a2000000-0000-0000-0000-000000000001',1,'診間 5','2020-01-01T00:00:00Z','2020-01-01T00:01:00Z',60,array['腹部超音波'],array['腹部超音波'],1,'completed');
+create table auth.permission_history_snapshot as
+select 'sessions' as kind,to_jsonb(s) as record from public.health_sessions s where s.id='a1000000-0000-0000-0000-000000000001'
+union all select 'participants',to_jsonb(p) from public.participants p where p.id='a2000000-0000-0000-0000-000000000001'
+union all select 'examinations',to_jsonb(e) from public.examinations e where e.id='a3000000-0000-0000-0000-000000000001';
 SQL
   fi
   psql_local < "$migration" > /dev/null
@@ -121,7 +142,24 @@ delete from auth.users where id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 SQL
   fi
 done
-for room_test_sql in supabase/tests/room_away.sql supabase/tests/session_room_count.sql; do
+# Re-checking the migration must preserve accounts created afterward and never
+# upgrade deny-by-default users or overwrite an administrator's changes.
+psql_local >/dev/null <<'SQL'
+insert into auth.users(id,email) values('a0000000-0000-0000-0000-000000000003','postmigration@itri.example.com');
+update public.staff_permissions set display_name='Edited after deploy',can_room=true,is_active=false
+where user_id='a0000000-0000-0000-0000-000000000003';
+SQL
+psql_local < supabase/migrations/202610070003_staff_page_permissions.sql >/dev/null
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if not exists(select 1 from public.staff_permissions where user_id='a0000000-0000-0000-0000-000000000003'
+    and display_name='Edited after deploy' and not can_registration and not can_console and can_room and not is_active) then
+    raise exception 'repeat migration overwrote existing permissions';
+  end if;
+end $$;
+SQL
+echo 'PASS: repeated permission migration preserves post-deploy account settings'
+for room_test_sql in supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql; do
   if ! psql_local < "$room_test_sql" > "$room_test_work/$(basename "$room_test_sql").log" 2>&1; then
     cat "$room_test_work/$(basename "$room_test_sql").log" >&2
     exit 1
@@ -134,6 +172,7 @@ done
 # observe away rather than create an examination from an earlier availability.
 psql_local >/dev/null <<'SQL'
 insert into auth.users(id) values('11111111-1111-1111-1111-111111111111');
+update public.staff_permissions set can_registration=true,can_console=true,can_room=true where user_id='11111111-1111-1111-1111-111111111111';
 insert into public.health_sessions(id, session_date, company_name, created_by)
 values('22222222-2222-2222-2222-222222222222', (clock_timestamp() at time zone 'Asia/Taipei')::date, 'room concurrency test', '11111111-1111-1111-1111-111111111111');
 insert into public.participants(id,session_id,sequence_no,employee_no,full_name,schedule_slot,group_code,status,checkin_no,checked_in_at)
@@ -209,7 +248,7 @@ if ! rg -q 'room_occupied' "$room_test_work/occupied.log"; then
 fi
 psql_local >/dev/null <<'SQL'
 do $$ begin
-  if (select count(*) from public.examinations where status='in_progress') <> 1 then
+  if (select count(*) from public.examinations e join public.participants p on p.id=e.participant_id where p.session_id='22222222-2222-2222-2222-222222222222' and e.status='in_progress') <> 1 then
     raise exception 'unexpected concurrency result';
   end if;
 end $$;

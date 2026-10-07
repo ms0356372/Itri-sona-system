@@ -2,6 +2,7 @@
 -- staff member. Intended for scripts/test-room-away-db.sh, never production.
 begin;
 insert into auth.users(id) values('11111111-1111-1111-1111-111111111111');
+update public.staff_permissions set can_registration=true,can_console=true,can_room=true where user_id='11111111-1111-1111-1111-111111111111';
 insert into public.health_sessions(id, session_date, company_name, created_by)
 values('22222222-2222-2222-2222-222222222222', (clock_timestamp() at time zone 'Asia/Taipei')::date, 'room absence test', '11111111-1111-1111-1111-111111111111'),
       ('22222222-2222-2222-2222-222222222223', (clock_timestamp() at time zone 'Asia/Taipei')::date, 'other room session', '11111111-1111-1111-1111-111111111111'),
@@ -122,8 +123,8 @@ begin
   failed := false;
   begin
     perform public.set_room_away(room.session_id, room.room_id, true);
-  exception when raise_exception then
-    if sqlerrm <> 'not_authorized' then raise; end if;
+  exception when insufficient_privilege then
+    if sqlerrm <> 'permission_denied' then raise; end if;
     failed := true;
   end;
   if not failed then raise exception 'missing identity accepted absence'; end if;

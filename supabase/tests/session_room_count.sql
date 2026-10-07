@@ -2,6 +2,7 @@
 -- role. The runner provides a disposable local Postgres; fixtures roll back.
 begin;
 insert into auth.users(id) values ('41111111-1111-1111-1111-111111111111');
+update public.staff_permissions set can_registration=true,can_console=true,can_room=true where user_id='41111111-1111-1111-1111-111111111111';
 create function pg_temp.assert_room_count(p_ok boolean, p_message text)
 returns void language plpgsql as $$ begin
   if p_ok is distinct from true then raise exception 'FAIL: %', p_message; end if;
@@ -11,7 +12,7 @@ returns void language plpgsql as $$
 declare rejected boolean := false;
 begin
   begin execute p_sql;
-  exception when raise_exception then
+  exception when raise_exception or insufficient_privilege then
     if sqlerrm <> p_error then raise; end if;
     rejected := true;
   end;
@@ -19,7 +20,6 @@ begin
 end $$;
 
 set local request.jwt.claim.sub = '41111111-1111-1111-1111-111111111111';
-set local role authenticated;
 insert into public.health_sessions(id,session_date,company_name,created_by)
 values ('42222222-2222-2222-2222-222222222224',(clock_timestamp() at time zone 'Asia/Taipei')::date,'default four rooms','41111111-1111-1111-1111-111111111111');
 insert into public.health_sessions(id,session_date,company_name,created_by,room_count)
@@ -30,12 +30,15 @@ values ('42222222-2222-2222-2222-222222222221',(clock_timestamp() at time zone '
        ('42222222-2222-2222-2222-222222222228',(clock_timestamp() at time zone 'Asia/Taipei')::date,'eight rooms','41111111-1111-1111-1111-111111111111',8),
        ('42222222-2222-2222-2222-222222222229',(clock_timestamp() at time zone 'Asia/Taipei')::date+1,'future rooms','41111111-1111-1111-1111-111111111111',4),
        ('42222222-2222-2222-2222-222222222220',(clock_timestamp() at time zone 'Asia/Taipei')::date-1,'historical six rooms','41111111-1111-1111-1111-111111111111',6);
+-- Closed-session and checked-in fixtures are administrative data, not client
+-- schedule writes. Production clients use the close/check-in RPCs instead.
 insert into public.health_sessions(id,session_date,company_name,created_by,room_count,status)
 values ('42222222-2222-2222-2222-222222222227',(clock_timestamp() at time zone 'Asia/Taipei')::date,'closed eight rooms','41111111-1111-1111-1111-111111111111',8,'closed');
 insert into public.participants(id,session_id,sequence_no,employee_no,full_name,schedule_slot,group_code,status,checkin_no,checked_in_at)
 values ('43333333-3333-3333-3333-333333333331','42222222-2222-2222-2222-222222222224',1,'1','A','08:00','A','等候中','A1',clock_timestamp()),
        ('43333333-3333-3333-3333-333333333332','42222222-2222-2222-2222-222222222226',1,'2','B','08:00','A','等候中','A1',clock_timestamp()),
        ('43333333-3333-3333-3333-333333333333','42222222-2222-2222-2222-222222222223',1,'3','C','08:00','A','等候中','A1',clock_timestamp());
+set local role authenticated;
 
 select pg_temp.assert_room_count(not has_table_privilege(current_user,'public.rooms','INSERT,UPDATE,DELETE'), 'room writes remain RPC-only');
 select pg_temp.assert_room_count(not has_function_privilege('anon','public.update_session_room_count(uuid,integer)','EXECUTE'), 'anonymous count updates denied');
@@ -84,8 +87,8 @@ select pg_temp.expect_room_count_error($sql$select public.set_room_away('4222222
 select pg_temp.expect_room_count_error($sql$select public.set_room_away('42222222-2222-2222-2222-222222222228','診間 9',true)$sql$,'invalid_room');
 select pg_temp.expect_room_count_error($sql$select public.start_examination('43333333-3333-3333-3333-333333333331','診間2',array['腹部超音波'])$sql$,'room_away');
 
--- A removed occupied/away room is rejected transactionally, even via direct
--- table UPDATE (the authenticated session table still permits staff writes).
+-- A removed occupied/away room is rejected transactionally. Clients cannot
+-- write room_count directly; its guard also protects administrator updates.
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',6);
 select public.start_examination('43333333-3333-3333-3333-333333333331','room_5',array['腹部超音波']);
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',8);
@@ -93,7 +96,10 @@ select pg_temp.assert_room_count((select status='in_progress' from public.rooms 
 select pg_temp.assert_room_count((select status='away' from public.rooms where session_id='42222222-2222-2222-2222-222222222224' and room_id='診間 2'), 'increase after starting retains away status');
 select public.update_session_room_count('42222222-2222-2222-2222-222222222224',6);
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',4)$sql$,'room_count_in_progress:診間 5');
+select pg_temp.expect_room_count_error($sql$update public.health_sessions set room_count=4 where id='42222222-2222-2222-2222-222222222224'$sql$,'permission denied for table health_sessions');
+reset role;
 select pg_temp.expect_room_count_error($sql$update public.health_sessions set room_count=4 where id='42222222-2222-2222-2222-222222222224'$sql$,'room_count_in_progress:診間 5');
+set local role authenticated;
 select pg_temp.assert_room_count((select room_count=6 from public.health_sessions where id='42222222-2222-2222-2222-222222222224'), 'failed shrink does not change count');
 select public.set_room_away('42222222-2222-2222-2222-222222222224','診間5',true);
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',4)$sql$,'room_count_away:診間 5');
@@ -122,11 +128,14 @@ select pg_temp.assert_room_count((select room_count=6 from public.health_session
 select public.update_session_room_count('42222222-2222-2222-2222-222222222229',2);
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222220',4)$sql$,'session_read_only');
 select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222227',4)$sql$,'session_read_only');
+select pg_temp.expect_room_count_error($sql$update public.health_sessions set room_count=4 where id='42222222-2222-2222-2222-222222222220'$sql$,'permission denied for table health_sessions');
+reset role;
 select pg_temp.expect_room_count_error($sql$update public.health_sessions set room_count=4 where id='42222222-2222-2222-2222-222222222220'$sql$,'session_read_only');
+set local role authenticated;
 select pg_temp.assert_room_count((select room_count=6 from public.health_sessions where id='42222222-2222-2222-2222-222222222220'), 'historical six rooms are not forced to four');
 select pg_temp.assert_room_count((select room_count=8 from public.health_sessions where id='42222222-2222-2222-2222-222222222227'), 'closed eight rooms stay eight');
 select set_config('request.jwt.claim.sub','',true);
-select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',2)$sql$,'not_authorized');
+select pg_temp.expect_room_count_error($sql$select public.update_session_room_count('42222222-2222-2222-2222-222222222224',2)$sql$,'permission_denied');
 reset role;
 select pg_temp.assert_room_count(exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='health_sessions'), 'count-only changes are published to realtime');
 rollback;
