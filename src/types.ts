@@ -1,4 +1,5 @@
 export type GroupCode='A'|'B'|'C'|'D'|'E'|'F'|'G';
+export type WorkflowMode='standard'|'simple';
 export interface StaffPermissions {
   userId:string;
   loginEmail:string|null;
@@ -9,8 +10,8 @@ export interface StaffPermissions {
   isActive:boolean;
 }
 export type WorkStatus='未報到'|'等候中'|'已叫號'|'上廁所'|'心電圖'|'先做其他'|'檢查中'|'已完成';
-export interface Session {id:string;sessionDate:string;companyName:string;status:'active'|'closing'|'closed';roomCount?:number|null}
-export interface Participant {id:string;sessionId:string;sequence:number;employeeNo:string;name:string;gender:string;slot:string;groupCode:GroupCode;plannedItems:string[];checkinNo:string|null;status:WorkStatus;checkedInAt:string|null;calledAt:string|null;note:string;updatedAt:string}
+export interface Session {id:string;sessionDate:string;companyName:string;status:'active'|'closing'|'closed';roomCount?:number|null;workflowMode?:WorkflowMode|null}
+export interface Participant {id:string;sessionId:string;sequence:number;employeeNo:string;name:string;gender:string;slot:string|null;groupCode:GroupCode|null;queueNumber?:number|null;plannedItems:string[];checkinNo:string|null;status:WorkStatus;checkedInAt:string|null;calledAt:string|null;note:string;updatedAt:string}
 export const ultrasoundItemNames=['腹部超音波','甲狀腺超音波','婦科超音波','前列腺超音波','乳房超音波'] as const;
 export type UltrasoundItemName=typeof ultrasoundItemNames[number];
 export interface HistoricalRecord {id?:number;fingerprint:string;nationalId:string;employeeNo:string;name:string;year:number;date:string;type:UltrasoundItemName;values:Record<string,string>;sourceFile:string}

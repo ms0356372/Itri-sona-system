@@ -104,7 +104,49 @@ create table auth.claim_migration_room_snapshot as select session_id,room_id,to_
 create table auth.claim_migration_examination_snapshot as select to_jsonb(examinations) as record from public.examinations where id='d4000000-0000-0000-0000-000000000001';
 SQL
   fi
+  if [[ "$migration" == *202610070005_simple_workflow.sql ]]; then
+    # Snapshot every deployed business column before the additive workflow
+    # migration. Do not accept changed old columns by updating old expectations.
+    psql_local >/dev/null <<'SQL'
+create table auth.workflow_migration_snapshot as
+select 'sessions' as kind,to_jsonb(s) as record from public.health_sessions s
+union all select 'participants',to_jsonb(p) from public.participants p
+union all select 'examinations',to_jsonb(e) from public.examinations e
+union all select 'rooms',to_jsonb(r) from public.rooms r
+union all select 'group_counters',to_jsonb(c) from public.group_counters c;
+SQL
+  fi
   psql_local < "$migration" > /dev/null
+  if [[ "$migration" == *202610070005_simple_workflow.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+do $$ begin
+  if exists (
+    with current_rows as (
+      select 'sessions' as kind,to_jsonb(s)-'workflow_mode' as record from public.health_sessions s
+      union all select 'participants',to_jsonb(p)-'queue_number' from public.participants p
+      union all select 'examinations',to_jsonb(e) from public.examinations e
+      union all select 'rooms',to_jsonb(r) from public.rooms r
+      union all select 'group_counters',to_jsonb(c) from public.group_counters c
+    ), changes as (
+      (select * from auth.workflow_migration_snapshot except all select * from current_rows)
+      union all
+      (select * from current_rows except all select * from auth.workflow_migration_snapshot)
+    ) select 1 from changes
+  ) then raise exception 'workflow migration changed existing business columns or rows'; end if;
+  if exists(select 1 from public.health_sessions where workflow_mode<>'standard')
+    or exists(select 1 from public.participants where queue_number is not null)
+    or exists(select 1 from public.simple_queue_counters) then
+    raise exception 'workflow migration invented simple tickets for existing standard sessions';
+  end if;
+end $$;
+-- The old permission suite compares whole rows. Only after proving every old
+-- column unchanged above, account for the two additive defaults in its snapshot.
+update auth.permission_history_snapshot
+set record=record||case kind when 'sessions' then '{"workflow_mode":"standard"}'::jsonb
+  when 'participants' then '{"queue_number":null}'::jsonb else '{}'::jsonb end;
+SQL
+    echo 'PASS: workflow migration preserves all legacy business columns/rows and defaults existing sessions to standard'
+  fi
   if [[ "$migration" == *202610070004_room_device_claim.sql ]]; then
     psql_local >/dev/null <<'SQL'
 do $$ begin
@@ -194,7 +236,7 @@ SQL
     echo 'PASS: repeated permission migration preserves post-deploy account settings'
   fi
 done
-for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql; do
+for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql; do
   if ! psql_local < "$room_test_sql" > "$room_test_work/$(basename "$room_test_sql").log" 2>&1; then
     cat "$room_test_work/$(basename "$room_test_sql").log" >&2
     exit 1
@@ -621,3 +663,86 @@ do $$ begin
 end $$;
 SQL
 echo 'PASS: heartbeat renewal -> competing takeover concurrency race'
+
+# Two independent registration devices contend for one simple-session counter.
+# The holder announces only after its first check-in owns the counter mutex.
+psql_local >/dev/null <<'SQL'
+insert into public.health_sessions(id,session_date,company_name,created_by,workflow_mode)
+values('b6100000-0000-0000-0000-000000000001',(clock_timestamp() at time zone 'Asia/Taipei')::date,'simple different-employee race','11111111-1111-1111-1111-111111111111','simple'),
+      ('b6100000-0000-0000-0000-000000000002',(clock_timestamp() at time zone 'Asia/Taipei')::date,'simple same-employee race','11111111-1111-1111-1111-111111111111','simple');
+SQL
+cat > "$room_test_work/simple-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select public.simple_check_in_participant('b6100000-0000-0000-0000-000000000001','RACE1','First arrival','男','一般');
+\echo SIMPLE_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+psql_local < "$room_test_work/simple-first.sql" > "$room_test_work/simple-first.log" 2>&1 &
+simple_first_pid=$!
+for attempt in {1..50}; do
+  if rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"; then break; fi
+  sleep 0.1
+done
+rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"
+if ! psql_local > "$room_test_work/simple-second.log" 2>&1 <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+select public.simple_check_in_participant('b6100000-0000-0000-0000-000000000001','RACE2','Second arrival','女','一般');
+SQL
+then cat "$room_test_work/simple-second.log" >&2; exit 1; fi
+wait "$simple_first_pid"
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if (select count(*) from public.participants where session_id='b6100000-0000-0000-0000-000000000001')<>2
+    or not exists(select 1 from public.participants where session_id='b6100000-0000-0000-0000-000000000001' and employee_no='RACE1' and queue_number=1 and checkin_no='1')
+    or not exists(select 1 from public.participants where session_id='b6100000-0000-0000-0000-000000000001' and employee_no='RACE2' and queue_number=2 and checkin_no='2')
+    or not exists(select 1 from public.simple_queue_counters where session_id='b6100000-0000-0000-0000-000000000001' and next_number=3) then
+    raise exception 'different registration devices did not receive unique sequential simple tickets';
+  end if;
+end $$;
+SQL
+echo 'PASS: two registration devices with different employees receive atomic simple tickets 1/2'
+
+cat > "$room_test_work/simple-duplicate-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select public.simple_check_in_participant('b6100000-0000-0000-0000-000000000002','SAME','Same arrival','男','一般','1234');
+\echo SIMPLE_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+psql_local < "$room_test_work/simple-duplicate-first.sql" > "$room_test_work/simple-duplicate-first.log" 2>&1 &
+simple_duplicate_pid=$!
+for attempt in {1..50}; do
+  if rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"; then break; fi
+  sleep 0.1
+done
+rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"
+if ! psql_local > "$room_test_work/simple-duplicate-second.log" 2>&1 <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+do $$ declare participant public.participants; begin
+  participant := public.simple_check_in_participant('b6100000-0000-0000-0000-000000000002','SAME','Same arrival','男','another item','9999');
+  if participant.queue_number<>1 or participant.checkin_no<>'1'
+    or participant.note<>'院內分機：1234' or participant.planned_items<>array['一般'] then
+    raise exception 'concurrent duplicate did not return the original simple participant';
+  end if;
+end $$;
+SQL
+then cat "$room_test_work/simple-duplicate-second.log" >&2; exit 1; fi
+wait "$simple_duplicate_pid"
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if (select count(*) from public.participants where session_id='b6100000-0000-0000-0000-000000000002')<>1
+    or not exists(select 1 from public.simple_queue_counters where session_id='b6100000-0000-0000-0000-000000000002' and next_number=2) then
+    raise exception 'concurrent same employee consumed a second simple ticket';
+  end if;
+end $$;
+SQL
+echo 'PASS: simultaneous registration of the same employee returns one participant/ticket and preserves original items/extension'

@@ -455,4 +455,60 @@ describe('超音波控制台診間狀態',()=>{
     expect(retry).toHaveBeenCalledTimes(1);
     expect(Array.from(container.querySelectorAll('button')).find(value=>value.textContent==='叫號')?.disabled).toBe(false);
   });
+
+  it('簡易控制台按數字號碼排序，沒有組別、時段與A～G篩選，保留原工作欄位',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    await render([
+      person({id:'number-10',name:'十號',groupCode:null,slot:null,checkinNo:'10',queueNumber:10,status:'等候中'}),
+      person({id:'number-2',name:'二號',groupCode:null,slot:null,checkinNo:'2',queueNumber:2,status:'等候中'}),
+      person({id:'number-1',name:'一號',groupCode:null,slot:null,checkinNo:'1',status:'等候中'}),
+    ],simple);
+    expect(Array.from(container.querySelectorAll('thead th')).map(cell=>cell.textContent)).toEqual(['號碼','姓名／工號','方案／本輪項目','診間','狀態','完成件數','現場操作']);
+    expect(Array.from(container.querySelectorAll<HTMLTableRowElement>('tbody tr')).map(row=>row.cells[0].textContent)).toEqual(['1','2','10']);
+    for(const label of ['全部','A','B','C','D','E','F','G'])expect(button(label)).toBeUndefined();
+    expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(4);
+    expect(list).toHaveBeenCalledWith(['number-1','number-10','number-2']);
+  });
+
+  it('簡易模式忽略已選標準分組，回到標準模式仍保留A～G篩選與原九欄顯示',async()=>{
+    const a=person({status:'等候中'});const b=person({id:'person-b',name:'B組人員',groupCode:'B',checkinNo:'B1',status:'等候中'});
+    await render([a,b]);await selectGroup('A');expect(container.querySelectorAll('tbody tr')).toHaveLength(1);
+    await render([person({groupCode:null,slot:null,queueNumber:1,checkinNo:'1'}),person({id:'person-b',name:'二號',groupCode:null,slot:null,queueNumber:2,checkinNo:'2'})],{...session,workflowMode:'simple'});
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(2);expect(button('A')).toBeUndefined();
+    await render([a,b],{...session,workflowMode:'standard'});
+    expect(container.querySelectorAll('thead th')).toHaveLength(9);expect(rowFor('王小明').cells[0].textContent).toBe('A');
+    expect(rowFor('王小明').cells[1].textContent).toBe('A1');expect(rowFor('王小明').cells[3].textContent).toBe('07:30~08:00');
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(1);expect(button('A')?.classList.contains('primary')).toBe(true);
+  });
+
+  it('簡易號碼沿用同一叫號與等候狀態RPC，方案一般不會變成假的A組',async()=>{
+    const simplePerson=person({groupCode:null,slot:null,checkinNo:'12',queueNumber:12,plannedItems:['一般'],status:'等候中'});
+    await render([simplePerson],{...session,workflowMode:'simple'},false);
+    await click('叫號');expect(callParticipant).toHaveBeenCalledWith('person-1');
+    const select=container.querySelector<HTMLSelectElement>('[aria-label="王小明 等候狀態"]')!;
+    await act(async()=>{select.value='先做其他';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(updateWaitingStatus).toHaveBeenCalledWith('person-1','先做其他');expect(changed).toHaveBeenCalledTimes(2);
+    expect(rowFor('王小明').cells[0].textContent).toBe('12');expect(rowFor('王小明').cells[2].textContent).toBe('一般');
+    expect(list).toHaveBeenCalledTimes(1);expect(button('追加檢查')).toBeUndefined();
+  });
+
+  it('簡易模式完成後可沿用追加輪次，從一般方案手動選超音波項目而不偽造原排程',async()=>{
+    const completed=examination({status:'completed',actualItems:['腹部超音波'],itemCount:1});
+    const second=examination({id:'round-2',roundNo:2,status:'waiting',roomId:null,startedAt:null,selectedItems:['甲狀腺超音波']});
+    const simplePerson=person({groupCode:null,slot:null,queueNumber:12,checkinNo:'12',plannedItems:['一般'],status:'已完成'});
+    list.mockResolvedValue([completed]);await render([simplePerson],{...session,workflowMode:'simple'});
+    await click('追加檢查');const modal=container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(modal.textContent).toContain('王小明｜12');expect(modal.textContent).toContain('原方案');expect(modal.textContent).not.toContain('原排程');
+    const thyroid=Array.from(modal.querySelectorAll('label')).find(label=>label.textContent==='甲狀腺超音波')!.querySelector<HTMLInputElement>('input')!;
+    expect(thyroid.checked).toBe(false);await act(async()=>{thyroid.click();});
+    list.mockResolvedValue([completed,second]);await click('加入等候');
+    expect(enqueueAdditionalExamination).toHaveBeenCalledWith('person-1',['甲狀腺超音波']);expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(rowFor('王小明').cells[2].textContent).toContain('追加甲狀腺超音波');expect(rowFor('王小明').cells[5].textContent).toBe('1 件');
+  });
+
+  it('沒有workflowMode的舊場次即使欄位為null也不推定簡易模式',async()=>{
+    await render([person({groupCode:null,slot:null,queueNumber:12,checkinNo:'12'})]);
+    expect(container.querySelectorAll('thead th')).toHaveLength(9);expect(button('A')).not.toBeUndefined();
+    expect(container.querySelector('thead')?.textContent).toContain('報到編號');expect(container.querySelector('thead')?.textContent).toContain('時段');
+  });
 });

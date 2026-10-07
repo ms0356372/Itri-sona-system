@@ -113,7 +113,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     await input(countInput(container),String(roomCount));
     expect(Array.from(card.querySelectorAll('li')).map(element=>element.textContent)).toEqual(Array.from({length:roomCount},(_,index)=>`診間${index+1}`));
     await click(container,'建立場次');
-    expect(remote.createSession).toHaveBeenCalledExactlyOnceWith('測試公司',expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),'staff-1',roomCount);
+    expect(remote.createSession).toHaveBeenCalledExactlyOnceWith('測試公司',expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),'staff-1',roomCount,'standard');
     expect(selection(container).value).toBe('created-session');
     expect(selection(container).selectedOptions[0].textContent).toContain(`超音波診間：${roomCount}間`);
     expect(countInput(container).value).toBe('4');
