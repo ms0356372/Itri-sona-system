@@ -116,7 +116,76 @@ union all select 'rooms',to_jsonb(r) from public.rooms r
 union all select 'group_counters',to_jsonb(c) from public.group_counters c;
 SQL
   fi
+  if [[ "$migration" == *202610070006_manual_optional_gender.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+-- Preserve a real simple ticket/counter alongside the existing historical
+-- standard rows, so the validation-only migration cannot silently renumber.
+insert into public.health_sessions(id,session_date,company_name,created_by,workflow_mode)
+values('e7100000-0000-0000-0000-000000000001',(clock_timestamp() at time zone 'Asia/Taipei')::date,
+  'pre-optional-gender simple','a0000000-0000-0000-0000-000000000001','simple');
+set request.jwt.claim.sub='a0000000-0000-0000-0000-000000000001';
+select public.simple_check_in_participant('e7100000-0000-0000-0000-000000000001','00125','Existing simple arrival','女','一般');
+create table auth.manual_gender_migration_snapshot as
+select 'sessions' as kind,to_jsonb(s) as record from public.health_sessions s
+union all select 'participants',to_jsonb(p) from public.participants p
+union all select 'examinations',to_jsonb(e) from public.examinations e
+union all select 'rooms',to_jsonb(r) from public.rooms r
+union all select 'group_counters',to_jsonb(c) from public.group_counters c
+union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+union all select 'registered_devices',to_jsonb(d) from public.registered_devices d
+union all select 'clearance_requests',to_jsonb(c) from public.clearance_requests c
+union all select 'ultrasound_items',to_jsonb(i) from public.ultrasound_items i;
+create table auth.manual_gender_function_snapshot as
+select p.oid,p.proacl,p.proowner,pg_get_functiondef(p.oid) as definition
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and p.prokind='f';
+SQL
+  fi
   psql_local < "$migration" > /dev/null
+  if [[ "$migration" == *202610070006_manual_optional_gender.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+do $$ declare old_function record; current_function record; expected_definition text; begin
+  if exists (
+    with current_rows as (
+      select 'sessions' as kind,to_jsonb(s) as record from public.health_sessions s
+      union all select 'participants',to_jsonb(p) from public.participants p
+      union all select 'examinations',to_jsonb(e) from public.examinations e
+      union all select 'rooms',to_jsonb(r) from public.rooms r
+      union all select 'group_counters',to_jsonb(c) from public.group_counters c
+      union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+      union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+      union all select 'registered_devices',to_jsonb(d) from public.registered_devices d
+      union all select 'clearance_requests',to_jsonb(c) from public.clearance_requests c
+      union all select 'ultrasound_items',to_jsonb(i) from public.ultrasound_items i
+    ), changes as (
+      (select * from auth.manual_gender_migration_snapshot except all select * from current_rows)
+      union all
+      (select * from current_rows except all select * from auth.manual_gender_migration_snapshot)
+    ) select 1 from changes
+  ) then raise exception 'optional gender migration changed existing data/counters/permissions'; end if;
+  for old_function in select * from auth.manual_gender_function_snapshot loop
+    select p.proacl,p.proowner,pg_get_functiondef(p.oid) as definition
+    into current_function from pg_proc p where p.oid=old_function.oid;
+    expected_definition:=old_function.definition;
+    if old_function.oid='public.simple_check_in_participant(uuid,text,text,text,text,text)'::regprocedure then
+      expected_definition:=replace(expected_definition,$remove$ or gender_value = ''$remove$,'');
+    end if;
+    if not found or current_function.proacl is distinct from old_function.proacl
+        or current_function.proowner is distinct from old_function.proowner
+        or current_function.definition is distinct from expected_definition then
+      raise exception 'optional gender migration changed function/signature/body/ACL beyond the one approved condition: %',old_function.oid::regprocedure;
+    end if;
+  end loop;
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.prokind='f')
+      <>(select count(*) from auth.manual_gender_function_snapshot) then
+    raise exception 'optional gender migration added/removed a public function';
+  end if;
+end $$;
+delete from public.health_sessions where id='e7100000-0000-0000-0000-000000000001';
+SQL
+    echo 'PASS: optional gender migration changes only the approved validation condition and preserves all data, counters, signatures, ownership and ACL'
+  fi
   if [[ "$migration" == *202610070005_simple_workflow.sql ]]; then
     psql_local >/dev/null <<'SQL'
 do $$ begin
@@ -236,7 +305,7 @@ SQL
     echo 'PASS: repeated permission migration preserves post-deploy account settings'
   fi
 done
-for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql; do
+for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql supabase/tests/manual_optional_gender.sql; do
   if ! psql_local < "$room_test_sql" > "$room_test_work/$(basename "$room_test_sql").log" 2>&1; then
     cat "$room_test_work/$(basename "$room_test_sql").log" >&2
     exit 1

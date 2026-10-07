@@ -6,8 +6,9 @@ import {addPreparedPerson} from '../roster/db';
 import type {MasterPerson,PreparedPerson} from '../roster/types';
 import {groupForSlot,normalizeSlot} from '../schedule/rules';
 import {assertPreparedParticipantIdentity,findParticipant,preparedCloudRow,upsertPreparedParticipant} from '../schedule/service';
-import {isAlreadyCheckedIn,isCompleteNationalId} from './lookup';
+import {isAlreadyCheckedIn} from './lookup';
 import {SupabaseCheckinService} from './service';
+import {manualIdentityError} from './manual';
 
 const errorDetail=(error:unknown)=>formatError(error).normalize('NFKC').replace(/[A-Z][\s-]*(?:[1289](?:[\s-]*\d){8}|[A-D](?:[\s-]*\d){8})/gi,'[身分證已隱藏]');
 
@@ -26,8 +27,9 @@ function validateWalkin(session:Session,person:PreparedPerson):PreparedPerson{
   if(!/^\d{4}-\d{2}-\d{2}$/.test(session.sessionDate)||Number.isNaN(Date.parse(session.sessionDate))||new Date(session.sessionDate).toISOString().slice(0,10)!==session.sessionDate)throw new Error('目前場次日期不正確，請重新選擇場次。');
   if(person.scheduleDate!==session.sessionDate)throw new Error('排程日期必須使用目前場次日期。');
   const prepared:PreparedPerson={...person,localId:person.localId||crypto.randomUUID(),nationalId:normalizeNationalId(person.nationalId),employeeNo:person.employeeNo.trim(),name:person.name.trim(),gender:person.gender.trim(),item:person.item.trim(),extension:person.extension.trim(),slot:normalizeSlot(person.slot),issues:[],confirmed:true};
-  if(!isCompleteNationalId(prepared.nationalId))throw new Error('請確認完整且格式正確的身分證。');
-  if(!prepared.name||!prepared.employeeNo||!prepared.gender||!prepared.item)throw new Error('姓名、工號、性別與項目皆為必填。');
+  const identityError=manualIdentityError(prepared);
+  if(identityError)throw new Error(identityError);
+  if(!prepared.item)throw new Error('請確認檢查項目。');
   if(!groupForSlot(prepared.slot))throw new Error('請選擇有效的排程時段。');
   // Validate privacy before committing any local or remote changes.
   preparedCloudRow(session.id,prepared,0);

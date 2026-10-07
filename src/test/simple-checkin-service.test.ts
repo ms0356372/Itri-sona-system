@@ -40,9 +40,16 @@ describe('簡易報到雲端邊界',()=>{
     await expect(simpleCheckIn({...session,status},person)).rejects.toThrow('可報到');
     expect(remote.rpc).not.toHaveBeenCalled();
   });
-  it.each(['employeeNo','name','gender','item'] as const)('必填欄位空白不消耗號碼：%s',async field=>{
-    await expect(simpleCheckIn(session,{...person,[field]:' '})).rejects.toThrow('必填');
+  it.each([
+    ['employeeNo','請輸入工號。'],['name','請輸入姓名。'],['item','項目不可空白'],
+  ] as const)('必填欄位空白不消耗號碼：%s',async(field,message)=>{
+    await expect(simpleCheckIn(session,{...person,[field]:' '})).rejects.toThrow(message);
     expect(remote.rpc).not.toHaveBeenCalled();
+  });
+  it.each(['',' '])('性別可以留白，送出空字串並接受原數字號碼：%j',async gender=>{
+    remote.rpc.mockResolvedValue({data:row({gender:''}),error:null});
+    expect(await simpleCheckIn(session,{...person,gender})).toMatchObject({gender:'',queueNumber:3,checkinNo:'3'});
+    expect(remote.rpc).toHaveBeenCalledWith('simple_check_in_participant',expect.objectContaining({p_employee_no:'00125',p_gender:'',p_item:'一般'}));
   });
   it.each(['employeeNo','name','gender','item','extension'] as const)('操作欄位混入完整身分證時不上傳：%s',async field=>{
     await expect(simpleCheckIn(session,{...person,[field]:'備註：ａ１２３４５６７８９'})).rejects.toThrow('身分證僅保留本機');
@@ -71,7 +78,7 @@ describe('簡易報到雲端邊界',()=>{
   it.each([
     [{message:'simple_identity_conflict'},'此工號已有報到紀錄'],
     [{message:'session_not_active'},'此場次目前無法報到'],
-    [{message:'invalid_simple_participant'},'必填'],
+    [{message:'invalid_simple_participant'},'資料不完整'],
     [{message:'invalid_workflow_mode'},'場次模式不符'],
     [{message:'session_not_found'},'找不到此場次'],
     [{code:'42501',message:'permission denied'},'此帳號沒有執行此功能的權限'],

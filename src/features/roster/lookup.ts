@@ -1,6 +1,6 @@
 import {normalizeCompanyName} from '../../lib/company';
 import {normalizeNationalId} from '../../lib/privacy';
-import {isCompleteNationalId} from '../checkin/lookup';
+import {manualIdentityError,normalizeManualFields} from '../checkin/manual';
 import {addMasterPerson,rosterDb} from './db';
 import type {MasterPerson} from './types';
 
@@ -23,15 +23,14 @@ export async function lookupCompanyMaster(companyName:string,lookup:MasterLookup
   return unique(await rosterDb.masterPeople.where('[companyKey+employeeNo]').equals([companyKey,employeeNo]).limit(2).toArray(),'工號');
 }
 
-/** New manual entries use the existing workstation's complete-ID validation. */
+/** Manual entries have their own defaults; formal file imports stay strict. */
 export function validateManualMasterPerson(person:MasterPerson):MasterPerson{
-  const next={...person,companyName:person.companyName.trim(),companyKey:normalizeCompanyName(person.companyName),
-    nationalId:normalizeNationalId(person.nationalId),employeeNo:person.employeeNo.trim(),name:person.name.trim(),
-    gender:person.gender.trim(),item:person.item.trim(),extension:person.extension.trim(),
-    originalActivity:person.originalActivity.trim()||person.item.trim()};
+  const normalized=normalizeManualFields(person);
+  const next={...normalized,companyName:person.companyName.trim(),companyKey:normalizeCompanyName(person.companyName),
+    nationalId:normalizeNationalId(person.nationalId),originalActivity:person.originalActivity.trim()||normalized.item};
   if(!next.companyKey)throw new Error('請先選擇目前公司的有效場次。');
-  if(!isCompleteNationalId(next.nationalId))throw new Error('請確認完整且格式正確的身分證。');
-  if(!next.employeeNo||!next.name||!next.gender||!next.item)throw new Error('姓名、工號、性別與項目皆為必填。');
+  const identityError=manualIdentityError(next);
+  if(identityError)throw new Error(identityError);
   return next;
 }
 

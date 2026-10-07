@@ -7,10 +7,11 @@ import type {MasterPerson} from '../roster/types';
 import {getQueueNumber,isSimpleSession} from '../workflow/mode';
 import {isCompleteNationalId} from './lookup';
 import {simpleCheckIn,simpleError,type SimplePerson} from './simpleService';
+import {DEFAULT_MANUAL_ITEM,manualIdentityError} from './manual';
 
 type Props={current:Session|null;participants:Participant[];onSuccess:()=>Promise<void>;setNotice:(message:string)=>void};
 type NewPerson={nationalId:string;name:string;employeeNo:string;gender:string;item:string;extension:string};
-const emptyPerson=():NewPerson=>({nationalId:'',name:'',employeeNo:'',gender:'',item:'',extension:''});
+const emptyPerson=():NewPerson=>({nationalId:'',name:'',employeeNo:'',gender:'',item:DEFAULT_MANUAL_ITEM,extension:''});
 
 export function SimpleCheckin({current,participants,onSuccess,setNotice}:Props){
   const[mode,setMode]=useState<'nationalId'|'employeeNo'>('nationalId');
@@ -19,6 +20,7 @@ export function SimpleCheckin({current,participants,onSuccess,setNotice}:Props){
   const[missing,setMissing]=useState(false);const[error,setError]=useState('');
   const[searching,setSearching]=useState(false);const[busy,setBusy]=useState(false);
   const[adding,setAdding]=useState(false);const[person,setPerson]=useState<NewPerson>(emptyPerson);
+  const[fixedNationalId,setFixedNationalId]=useState(false);
   const[addToMaster,setAddToMaster]=useState(false);
   const input=useRef<HTMLInputElement>(null);const mounted=useRef(false);const request=useRef(0);
   const submitting=useRef(false);const timer=useRef<ReturnType<typeof setTimeout>|null>(null);
@@ -31,12 +33,12 @@ export function SimpleCheckin({current,participants,onSuccess,setNotice}:Props){
     if(!isCurrent())return;
     request.current++;if(timer.current!==null)clearTimeout(timer.current);
     setQuery('');setCandidate(null);setResult(null);setRepeat(false);setMissing(false);setError('');
-    setAdding(false);setPerson(emptyPerson());setAddToMaster(false);setSearching(false);input.current?.focus();
+    setAdding(false);setPerson(emptyPerson());setFixedNationalId(false);setAddToMaster(false);setSearching(false);input.current?.focus();
   };
   useEffect(()=>{
     mounted.current=true;request.current++;
     setMode('nationalId');setQuery('');setCandidate(null);setResult(null);setRepeat(false);setMissing(false);
-    setError('');setAdding(false);setPerson(emptyPerson());setAddToMaster(false);setSearching(false);setBusy(false);
+    setError('');setAdding(false);setPerson(emptyPerson());setFixedNationalId(false);setAddToMaster(false);setSearching(false);setBusy(false);
     return()=>{mounted.current=false;if(timer.current!==null)clearTimeout(timer.current);};
   },[key]);
   const showCandidate=(source:SimplePerson)=>{
@@ -102,8 +104,10 @@ export function SimpleCheckin({current,participants,onSuccess,setNotice}:Props){
     request.current++;if(timer.current!==null)clearTimeout(timer.current);
     setSearching(false);setCandidate(null);setResult(null);setRepeat(false);setMissing(false);
     setPerson({...emptyPerson(),nationalId:mode==='nationalId'?query:''});
+    setFixedNationalId(mode==='nationalId'&&isCompleteNationalId(query));
     setAddToMaster(false);setError('');setAdding(true);
   };
+  const complete=manualIdentityError(person)==='';
   const liveResult=result?(participants.find(value=>value.id===result.id)??result):null;
   return <div className="rounded-2xl bg-white p-5 shadow-sm">
     <h3 className="mb-3 font-bold">簡易報到</h3>
@@ -127,10 +131,11 @@ export function SimpleCheckin({current,participants,onSuccess,setNotice}:Props){
       {!adding&&!liveResult&&<button type="button" className="secondary mt-4" disabled={busy} onClick={startAdding}>新增受檢者</button>}
       {adding&&<form className="mt-4 space-y-3 rounded-xl border p-4" aria-label="簡易模式新增受檢者" onSubmit={event=>void addAndCheckIn(event)}>
         <h4 className="font-black">新增全新人員</h4>
-        {([['nationalId','身分證'],['name','姓名'],['employeeNo','工號'],['gender','性別'],['item','項目'],['extension','院內分機（選填）']] as const).map(([field,label])=><label key={field} className="block"><span className="label">{label}</span>
-          <input className="input" required={field!=='extension'} aria-label={`新增${label}`} disabled={busy} value={person[field]} onChange={event=>setPerson(previous=>({...previous,[field]:event.target.value}))}/></label>)}
+        <div className="grid gap-3 sm:grid-cols-2">{([['nationalId','身分證'],['name','姓名'],['employeeNo','工號'],['gender','性別（選填）'],['item','項目'],['extension','院內分機（選填）']] as const).map(([field,label])=><label key={field} className="block"><span className="label">{label}</span>
+          <input className="input" required={field==='nationalId'||field==='name'||field==='employeeNo'} readOnly={field==='nationalId'&&fixedNationalId} aria-label={`新增${label}`} disabled={busy} value={person[field]}
+            onChange={event=>{if(field==='nationalId'&&fixedNationalId)return;const value=field==='nationalId'?normalizeNationalId(event.target.value):event.target.value;setPerson(previous=>({...previous,[field]:value}));}}/></label>)}</div>
         <label className="flex items-center gap-2"><input type="checkbox" disabled={busy} checked={addToMaster} onChange={event=>setAddToMaster(event.target.checked)}/>同時加入公司大名單</label>
-        <div className="flex gap-2"><button className="secondary" type="button" disabled={busy} onClick={()=>{setAdding(false);setError('');}}>取消</button><button className="primary" disabled={busy}>{busy?'報到中…':'新增並報到'}</button></div>
+        <div className="flex gap-2"><button className="secondary" type="button" disabled={busy} onClick={()=>{setAdding(false);setError('');}}>取消</button><button className="primary disabled:opacity-40" disabled={busy||!complete}>{busy?'報到中…':'新增並報到'}</button></div>
       </form>}
     </>}
     {error&&<p role="alert" className="mt-3 rounded-xl bg-red-50 p-3 text-red-700">{error}</p>}
