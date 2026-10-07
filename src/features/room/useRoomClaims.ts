@@ -3,6 +3,8 @@ import {requireSupabase} from '../../lib/supabase';
 import {ROOM_CLAIM_HEARTBEAT_SECONDS,ROOM_CLAIM_REFRESH_SECONDS,ROOM_CLAIM_RELEASE_WAIT_MS,ROOM_CLAIM_TTL_SECONDS} from './claimConfig';
 import {claimRoom,formatRoomClaimError,getRoomClaims,heartbeatRoomClaim,isRoomClaimDenied,releaseRoomClaim,switchRoomClaim,type RoomClaim} from './claims';
 import {getRoomCount,getRoomIds,isRoomEnabled,normalizeRoomId} from './status';
+import {getDeviceIdentity} from './device';
+import {createRefreshCoalescer,type RefreshCoalescer} from '../sync/refresh';
 
 export type RoomClaimState={
   roomId:string|null;claims:RoomClaim[];isOwned:boolean;claimConfirmed:boolean;
@@ -11,7 +13,9 @@ export type RoomClaimState={
   release:()=>Promise<boolean>;revoke:()=>void;
 };
 type Snapshot={sessionId:string|null;claim:RoomClaim|null;claims:RoomClaim[];loading:boolean;busy:boolean;error:string;warning:string};
-type Scope={sessionId:string;token:symbol;active:boolean};
+type Scope={sessionId:string;token:symbol;active:boolean;eventVersion:number;initialized:boolean;refresh?:RefreshCoalescer;heartbeat?:RefreshCoalescer;mutationRooms:Set<string>};
+type ClaimEvent={eventType?:string;new?:Record<string,unknown>;old?:Record<string,unknown>};
+const claimFields=['claimed_by_device_id','claimed_by_user_id','claimed_at','claim_expires_at'] as const;
 // Serialize each device's lifecycle in this browser, including delayed unmount cleanup.
 // A superseded component may never release a newer component's confirmed claim.
 const owners=new Map<string,symbol>();
@@ -43,7 +47,6 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
   const revision=useRef(0);
   const restoreBlocked=useRef(false);
   const busyRef=useRef(false);
-  const refreshing=useRef(false);
   const refreshLatest=useRef<()=>Promise<void>>(()=>Promise.resolve());
   const [snapshot,setSnapshot]=useState<Snapshot>(()=>empty(sessionId,Boolean(sessionId)));
   const isCurrent=useCallback((scope:Scope)=>scope.active&&scopeRef.current===scope&&inputs.current.sessionId===scope.sessionId&&owners.get(scope.sessionId)===scope.token,[]);
@@ -83,29 +86,17 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
     else setSnapshot(previous=>({...previous,loading:false,error:formatRoomClaimError(error),warning:''}));
   },[clearLease,isCurrent]);
 
-  const refresh=useCallback(async():Promise<void>=>{
+  const refresh=useCallback(():Promise<void>=>{
     const scope=scopeRef.current;
-    if(!scope||!isCurrent(scope)||refreshing.current)return;
-    refreshing.current=true;
-    const version=revision.current;
-    try{
-      await enqueue(scope,async()=>{
-        const started=performance.now();
-        const claims=(await getRoomClaims(scope.sessionId)).filter(value=>isRoomEnabled(value.roomId,inputs.current.count));
-        if(!isCurrent(scope)||version!==revision.current)return;
-        setSnapshot(previous=>({...previous,claims,loading:false,warning:''}));
-        const mine=claims.find(value=>value.isMine&&value.isClaimed);
-        if(mine&&!restoreBlocked.current)confirm(scope,mine,started);
-        else if(lease.current)clearLease();
-      });
-    }catch(error){failure(scope,error);}
-    finally{if(scopeRef.current===scope)refreshing.current=false;}
-  },[clearLease,confirm,failure,isCurrent]);
-  refreshLatest.current=refresh;
+    return scope&&isCurrent(scope)?scope.refresh?.refresh()??Promise.resolve():Promise.resolve();
+  },[isCurrent]);
+  refreshLatest.current=()=>{
+    const scope=scopeRef.current;
+    return scope&&isCurrent(scope)?scope.refresh?.refresh(true)??Promise.resolve():Promise.resolve();
+  };
 
-  const heartbeat=useCallback(async():Promise<void>=>{
-    const scope=scopeRef.current;
-    if(!scope||!isCurrent(scope))return;
+  const runHeartbeat=useCallback(async(scope:Scope):Promise<void>=>{
+    if(!isCurrent(scope))return;
     try{
       await enqueue(scope,async()=>{
         const current=lease.current;
@@ -125,9 +116,13 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
     try{
       return await enqueue(scope,async()=>{
         const current=lease.current;const version=revision.current;const started=performance.now();
-        const claim=current&&current.roomId!==roomId
-          ?await switchRoomClaim(scope.sessionId,current.roomId,roomId)
-          :await claimRoom(scope.sessionId,roomId);
+        scope.mutationRooms.add(roomId);if(current)scope.mutationRooms.add(current.roomId);
+        let claim:RoomClaim;
+        try{
+          claim=current&&current.roomId!==roomId
+            ?await switchRoomClaim(scope.sessionId,current.roomId,roomId)
+            :await claimRoom(scope.sessionId,roomId);
+        }finally{scope.mutationRooms.clear();}
         if(!isCurrent(scope)){
           // The component disappeared while acquisition was in flight. A newer scope owns cleanup.
           void enqueue(scope,()=>releaseRoomClaim(scope.sessionId,claim.roomId,claim.claimedAt),true).catch(()=>{});
@@ -160,7 +155,9 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
     try{
       const operation=enqueue(scope,async()=>{
         const current=lease.current;if(!current)return true;
-        await releaseRoomClaim(scope.sessionId,current.roomId,current.claimedAt);
+        scope.mutationRooms.add(current.roomId);
+        try{await releaseRoomClaim(scope.sessionId,current.roomId,current.claimedAt);}
+        finally{scope.mutationRooms.delete(current.roomId);}
         if(isCurrent(scope))clearLease('');
         return true;
       });
@@ -184,48 +181,93 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
   },[clearLease,isCurrent]);
 
   useEffect(()=>{
-    revision.current++;restoreBlocked.current=false;lease.current=null;deadline.current=0;busyRef.current=false;refreshing.current=false;
+    revision.current++;restoreBlocked.current=false;lease.current=null;deadline.current=0;busyRef.current=false;
     setSnapshot(empty(sessionId,Boolean(sessionId)));
     if(!sessionId){scopeRef.current=null;return;}
-    const scope:Scope={sessionId,token:Symbol(sessionId),active:true};scopeRef.current=scope;owners.set(sessionId,scope.token);
+    const scope:Scope={sessionId,token:Symbol(sessionId),active:true,eventVersion:0,initialized:false,mutationRooms:new Set()};scopeRef.current=scope;owners.set(sessionId,scope.token);
     const invalidate=()=>{revision.current++;};
     const initialPreferred=inputs.current.preferredRoomId;
     const initialVersion=revision.current;
-    const initialize=async()=>{
-      busyRef.current=true;setSnapshot(previous=>({...previous,busy:true}));
+    busyRef.current=true;setSnapshot(previous=>({...previous,busy:true}));
+    scope.refresh=createRefreshCoalescer(async()=>{
+      const initializing=!scope.initialized;
       try{
         await enqueue(scope,async()=>{
+          const version=revision.current;const eventVersion=scope.eventVersion;const startedRead=performance.now();
           const claims=(await getRoomClaims(sessionId)).filter(value=>isRoomEnabled(value.roomId,inputs.current.count));
-          if(!isCurrent(scope)||initialVersion!==revision.current)return;
-          setSnapshot(previous=>({...previous,claims}));
+          if(!isCurrent(scope)||version!==revision.current||eventVersion!==scope.eventVersion){
+            if(initializing&&isCurrent(scope)&&initialVersion!==revision.current)scope.initialized=true;
+            return;
+          }
+          setSnapshot(previous=>({...previous,claims,loading:false,warning:''}));
           const mine=claims.find(value=>value.isMine&&value.isClaimed);
+          if(!initializing){
+            if(mine&&!restoreBlocked.current)confirm(scope,mine,startedRead);
+            else if(lease.current)clearLease();
+            return;
+          }
+          scope.initialized=true;
+          if(initialVersion!==revision.current)return;
           const preferred=initialPreferred&&isRoomEnabled(initialPreferred,inputs.current.count)?normalizeRoomId(initialPreferred):getRoomIds(inputs.current.count)[0];
           const target=mine?.roomId??preferred;
           if(!mine&&claims.some(value=>value.roomId===target&&value.isClaimed)){setSnapshot(previous=>({...previous,loading:false,error:'此診間目前正在其他設備使用中。'}));return;}
-          const started=performance.now();const claim=await claimRoom(sessionId,target);
+          scope.mutationRooms.add(target);
+          const started=performance.now();let claim:RoomClaim;
+          try{claim=await claimRoom(sessionId,target);}
+          finally{scope.mutationRooms.delete(target);}
           if(isCurrent(scope)&&initialVersion===revision.current)confirm(scope,claim,started);
           else void enqueue(scope,()=>releaseRoomClaim(sessionId,claim.roomId,claim.claimedAt),true).catch(()=>{});
         });
-      }catch(error){failure(scope,error);}
-      finally{if(scopeRef.current===scope){busyRef.current=false;if(isCurrent(scope))setSnapshot(previous=>({...previous,loading:false,busy:false}));}}
+      }catch(error){scope.initialized=true;failure(scope,error);}
+      finally{
+        if(initializing&&scope.initialized&&scopeRef.current===scope){busyRef.current=false;if(isCurrent(scope))setSnapshot(previous=>({...previous,loading:false,busy:false}));}
+      }
+    });
+    scope.heartbeat=createRefreshCoalescer(()=>runHeartbeat(scope));
+    void scope.refresh.refresh();
+    const reload=()=>{if(isCurrent(scope))void scope.refresh?.schedule(false);};
+    const renew=()=>{if(isCurrent(scope))void scope.heartbeat?.schedule(false);};
+    const changed=(payload?:ClaimEvent)=>{
+      if(!isCurrent(scope))return;
+      const next=payload?.new;
+      const scopedRow=payload?.eventType==='DELETE'?payload.old:next;
+      if(scopedRow&&typeof scopedRow.session_id==='string'&&scopedRow.session_id!==sessionId)return;
+      if(scopedRow&&typeof scopedRow.room_id==='string'&&!isRoomEnabled(scopedRow.room_id,inputs.current.count))return;
+      if(next&&typeof next.session_id==='string'&&next.session_id!==sessionId)return;
+      if(next&&typeof next.room_id==='string'){
+        const roomId=normalizeRoomId(next.room_id);
+        if(!isRoomEnabled(roomId,inputs.current.count))return;
+        const old=payload?.old;
+        // A complete payload proves that a room-status-only update did not change its lease.
+        if(payload?.eventType==='UPDATE'&&old&&claimFields.every(field=>field in next&&field in old&&next[field]===old[field]))return;
+        try{
+          const {deviceId}=getDeviceIdentity();
+          const mine=lease.current;
+          // Our mutation's RPC response confirms its own lease. Its Realtime echo never
+          // grants access or needs another list request for unrelated rooms.
+          if(scope.mutationRooms.has(roomId)&&(next.claimed_by_device_id===deviceId||next.claimed_by_device_id===null))return;
+          if(mine?.roomId===roomId&&next.claimed_by_device_id===deviceId&&next.claimed_at===mine.claimedAt&&typeof next.claim_expires_at==='string'
+            &&mine.claimExpiresAt&&Date.parse(next.claim_expires_at)>=Date.parse(mine.claimExpiresAt))return;
+        }catch{/* Unknown credentials cannot justify ignoring an ownership event. */}
+      }
+      scope.eventVersion++;void scope.refresh?.schedule();
     };
-    void initialize();
     let unsubscribe=()=>{};
     try{
       const client=requireSupabase();
       const channel=client.channel(`room-claims:${sessionId}:${channelId}`)
-        .on('postgres_changes',{event:'*',schema:'public',table:'rooms',filter:`session_id=eq.${sessionId}`},()=>{void refresh();})
+        .on('postgres_changes',{event:'*',schema:'public',table:'rooms',filter:`session_id=eq.${sessionId}`},changed)
         .subscribe(status=>{
           if(!isCurrent(scope))return;
-          if(status==='SUBSCRIBED'){void refresh();void heartbeat();}
+          if(status==='SUBSCRIBED'){reload();renew();}
           else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED')setSnapshot(previous=>({...previous,warning:networkWarning}));
         });
       unsubscribe=()=>{void client.removeChannel(channel);};
     }catch{if(isCurrent(scope))setSnapshot(previous=>({...previous,warning:networkWarning}));}
-    const heartbeatTimer=setInterval(()=>{void heartbeat();},ROOM_CLAIM_HEARTBEAT_SECONDS*1000);
+    const heartbeatTimer=setInterval(()=>{void scope.heartbeat?.refresh();},ROOM_CLAIM_HEARTBEAT_SECONDS*1000);
     const refreshTimer=setInterval(()=>{void refresh();},ROOM_CLAIM_REFRESH_SECONDS*1000);
-    const focus=()=>{void refresh();void heartbeat();};
-    const online=()=>{void heartbeat();void refresh();};
+    const focus=()=>{reload();renew();};
+    const online=()=>{renew();reload();};
     const visible=()=>{if(document.visibilityState==='visible')focus();};
     const offline=()=>{if(isCurrent(scope))setSnapshot(previous=>({...previous,warning:networkWarning}));};
     const pagehide=()=>{void release();};
@@ -233,6 +275,7 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
     document.addEventListener('visibilitychange',visible);
     return()=>{
       scope.active=false;invalidate();
+      scope.refresh?.dispose();scope.heartbeat?.dispose();
       if(expiryTimer.current!==null){clearTimeout(expiryTimer.current);expiryTimer.current=null;}
       clearInterval(heartbeatTimer);clearInterval(refreshTimer);unsubscribe();
       window.removeEventListener('focus',focus);window.removeEventListener('online',online);window.removeEventListener('offline',offline);window.removeEventListener('pagehide',pagehide);
@@ -240,9 +283,15 @@ export function useRoomClaims(sessionId:string|null,roomCount?:number|null,prefe
       const current=lease.current;
       if(current)void enqueue(scope,()=>releaseRoomClaim(sessionId,current.roomId,current.claimedAt),true).catch(()=>{});
     };
-  },[sessionId,channelId,confirm,failure,heartbeat,isCurrent,refresh,release]);
+  },[sessionId,channelId,clearLease,confirm,failure,isCurrent,refresh,release,runHeartbeat]);
 
-  useEffect(()=>{if(sessionId)void refresh();},[sessionId,count,refresh]);
+  const previousCount=useRef({sessionId,count});
+  useEffect(()=>{
+    const previous=previousCount.current;previousCount.current={sessionId,count};
+    if(sessionId===previous.sessionId&&count!==previous.count&&sessionId){
+      const scope=scopeRef.current;if(scope&&isCurrent(scope)){scope.eventVersion++;void scope.refresh?.refresh(true);}
+    }
+  },[sessionId,count,isCurrent]);
   const current=snapshot.sessionId===sessionId?snapshot:empty(sessionId,Boolean(sessionId));
   const validClaim=current.claim&&isRoomEnabled(current.claim.roomId,count)&&deadline.current>performance.now()?current.claim:null;
   const claims=current.claims.filter(claim=>isRoomEnabled(claim.roomId,count));

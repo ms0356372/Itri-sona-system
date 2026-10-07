@@ -3,7 +3,8 @@ import {ArrowLeft,Check,ChevronDown,ChevronUp,Clock,Eye,EyeOff,FileSpreadsheet,F
 import type {Examination,HistoricalRecord,HistoryImportSummary,Participant,Session} from '../../types';
 import {demoHistory,ultrasoundItems,type HistoryVisit,type UltrasoundItem} from './demoData';
 import {clearHistory,findHistoryByEmployeeNo,findHistoryByNationalId,historyStats,importHistory} from '../history/db';
-import {displayUltrasoundResult,parseHistoryFile} from '../history/excel';
+import {displayUltrasoundResult} from '../history/display';
+import {parseHistoryFile} from '../history/import';
 import {cloudNow,completeExamination,getExamination,getRoomExamination,listExaminations,restoreDraft,saveExaminationDraft,startExamination} from '../examination/service';
 import {UltrasoundUiSettingsPanel} from './UltrasoundUiSettingsPanel';
 import {defaultUltrasoundUiSettings,loadUltrasoundUiSettings,saveUltrasoundUiSettings,ULTRASOUND_UI_STORAGE_KEY,ultrasoundUiCssVariables,type UltrasoundUiSettings} from './ultrasoundUiSettings';
@@ -15,6 +16,8 @@ import {setRoomAway} from './service';
 import {RoomStatusBadge} from './RoomStatusBadge';
 import {getRoomCount,getRoomIds,normalizeRoomId} from './status';
 import {formatError} from '../../lib/errors';
+import {subscribeExaminations} from '../sync/realtime';
+import {createRefreshCoalescer,type RefreshCoalescer} from '../sync/refresh';
 
 const demoPatient:Participant={id:'demo-patient',sessionId:'demo-session',sequence:15,employeeNo:'B30040',name:'王小明（虛構）',gender:'男',slot:'07:30～08:00',groupCode:'A',plannedItems:[],checkinNo:'A15',status:'等候中',checkedInAt:new Date().toISOString(),calledAt:null,note:'',updatedAt:''};
 const formatElapsed=(seconds:number)=>[Math.floor(seconds/3600),Math.floor(seconds%3600/60),seconds%60].map(value=>String(value).padStart(2,'0')).join(':');
@@ -53,9 +56,18 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
   const accessRef=useRef({workspaceKey,canOperate});accessRef.current={workspaceKey,canOperate};
   const hasCurrentAccess=()=>accessRef.current.canOperate&&accessRef.current.workspaceKey===workspaceKey;
   const workspaces=useRef(new Map<string,RoomWorkspace>());
+  const historyOwner=useRef<{key:string;participantId:string}|null>(null);
   const selectionRequest=useRef(0);
   const invalidateSelection=useCallback(()=>{selectionRequest.current++;},[]);
   const participantsRef=useRef(participants);participantsRef.current=participants;
+  const examinationView=useRef({examination,selected});examinationView.current={examination,selected};
+  const participantIds=new Set(participants.filter(person=>person.sessionId===current?.id).map(person=>person.id));
+  const relevantParticipant=selected?.id??examination?.participantId;
+  const relevantParticipantIds=useRef(new Set<string>());relevantParticipantIds.current=new Set(relevantParticipant&&participantIds.has(relevantParticipant)?[relevantParticipant]:[]);
+  const knownExaminationIds=useRef(new Set<string>());if(examination)knownExaminationIds.current.add(examination.id);
+  const examinationRefresh=useRef<RefreshCoalescer|null>(null);
+  const selectedStatus=participants.find(person=>person.id===relevantParticipant)?.status;
+  const selectedPresent=Boolean(relevantParticipant&&participantIds.has(relevantParticipant));
   const cloudRoom=roomStates.rooms.find(value=>value.roomId===room);
   const liveRoom=cloudRoom;
   const status=demo?(demoAway[room]?'away':examination?.status==='in_progress'?'in_progress':'idle'):liveRoom?.status;
@@ -90,55 +102,88 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
   },[]);
   // Room status and roster refreshes must never reset the current workspace.
   useEffect(()=>{
-    let cancelled=false;const key=workspaceKey;invalidateSelection();
+    const key=workspaceKey;invalidateSelection();
     const saved=workspaces.current.get(key);
+    historyOwner.current=saved?.selected?{key,participantId:saved.selected.id}:null;
     setMode(saved?.mode??'nationalId');setQuery(saved?.query??'');setSelected(saved?.selected??(demo?demoPatient:null));
     setLocalPerson(saved?.localPerson??null);setRecords(saved?.records??[]);setItems(saved?.items??[]);
     setExpanded(saved?.expanded??[]);setExamination(saved?.examination??null);setShowTimer(saved?.showTimer??false);
     setClockOffset(saved?.clockOffset??0);setConfirming(saved?.confirming??false);setActualItems(saved?.actualItems??[]);
     setMessage(saved?.message??'');setLoadedWorkspace(key);
-    if(demo||!current||!confirmedRoom){setRestoring(false);return()=>{cancelled=true;};}
-    setRestoring(true);
-    void getRoomExamination(current.id,room).then(async value=>{
-      if(cancelled||workspaceKeyRef.current!==key)return;
-      if(value&&value.id!==saved?.examination?.id){
-        const person=participantsRef.current.find(p=>p.id===value.participantId);
-        await applyExamination(value,person);
-        if(person){const history=await findHistoryByEmployeeNo(person.employeeNo);if(!cancelled&&workspaceKeyRef.current===key)setRecords(history);}
-      }
-    }).catch(error=>{if(!cancelled)setMessage(roomError(error));}).finally(()=>{if(!cancelled)setRestoring(false);});
-    return()=>{cancelled=true;invalidateSelection();};
-  },[workspaceKey,demo,current?.id,room,confirmedRoom,applyExamination,invalidateSelection]); // eslint-disable-line react-hooks/exhaustive-deps
+    setRestoring(Boolean(!demo&&current&&confirmedRoom));
+    return()=>{invalidateSelection();};
+  },[workspaceKey,demo,current?.id,room,confirmedRoom,invalidateSelection]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{
     if(loadedWorkspace!==workspaceKey)return;
     const person=participants.find(p=>p.id===(selected?.id??examination?.participantId));
     if(person&&person!==selected)setSelected(person);
   },[participants,selected,examination?.participantId,loadedWorkspace,workspaceKey]);
-  // Reconcile other tablets' examination changes without resetting an unchanged patient's workspace.
+  // One authoritative room read restores the workspace and reconciles later examination events.
   useEffect(()=>{
-    if(demo||!current||!confirmedRoom||loadedWorkspace!==workspaceKey||restoring)return;
-    let cancelled=false;const key=workspaceKey;const request=selectionRequest.current;
-    const valid=()=>!cancelled&&workspaceKeyRef.current===key&&selectionRequest.current===request;
-    void (async()=>{
-      const active=await getRoomExamination(current.id,room);
-      if(!valid())return;
-      if(active){
-        if(active.id!==examination?.id){
-          const person=participantsRef.current.find(value=>value.id===active.participantId);
-          await applyExamination(active,person);
-          if(person){const history=await findHistoryByEmployeeNo(person.employeeNo);if(valid())setRecords(history);}
+    if(demo||!current||!confirmedRoom)return;
+    let active=true;let initial=true;const key=workspaceKey;const sessionId=current.id;
+    const saved=workspaces.current.get(key);const deleted=new Set<string>();
+    knownExaminationIds.current=new Set(saved?.examination?[saved.examination.id]:[]);
+    const refresh=createRefreshCoalescer(async()=>{
+      const request=selectionRequest.current;const first=initial;initial=false;
+      const previous=first?saved?.examination:examinationView.current.examination;
+      const selectedPerson=first?saved?.selected:examinationView.current.selected;
+      const valid=()=>active&&workspaceKeyRef.current===key&&accessRef.current.canOperate&&selectionRequest.current===request;
+      try{
+        const fetched=await getRoomExamination(sessionId,room);
+        if(!valid())return;
+        const running=fetched&&!deleted.has(fetched.id)?fetched:null;
+        if(running){
+          knownExaminationIds.current.add(running.id);
+          const person=participantsRef.current.find(value=>value.id===running.participantId);
+          if(running.id!==previous?.id||running.status!==previous.status){
+            await applyExamination(running,person);
+          }else if(person&&!selectedPerson){
+            setSelected(person);
+          }
+          if(person&&(historyOwner.current?.key!==key||historyOwner.current.participantId!==person.id)){
+            const history=await findHistoryByEmployeeNo(person.employeeNo);
+            if(valid()){historyOwner.current={key,participantId:person.id};setRecords(history);}
+          }
+        }else{
+          const personId=selectedPerson?.id??previous?.participantId;
+          if(personId){
+            const rounds=(await listExaminations([personId])).filter(value=>!deleted.has(value.id));
+            if(!valid())return;
+            for(const round of rounds)knownExaminationIds.current.add(round.id);
+            const next=[...rounds].reverse().find(value=>value.status==='waiting'||value.status==='in_progress')??rounds.find(value=>value.id===previous?.id);
+            if(next?.status==='completed'){setExamination(next);setConfirming(false);}
+            else if(next&&(next.id!==previous?.id||next.status!==previous.status)){
+              await applyExamination(next,selectedPerson??undefined);
+              if(valid()&&next.status==='in_progress'&&next.roomId!==room)setMessage(`此受檢者正在${next.roomId}檢查中。`);
+            }else if(!next&&previous){setExamination(null);setConfirming(false);}
+          }
         }
-      }else if(examination?.status==='in_progress'&&examination.roomId===room){
-        const rounds=await listExaminations([examination.participantId]);
-        const updated=rounds.find(value=>value.id===examination.id);
-        if(valid()&&updated?.status==='completed'){setExamination(updated);setConfirming(false);}
-      }
-    })().catch(error=>{if(valid())setMessage(roomError(error));});
-    return()=>{cancelled=true;};
-  },[participants,liveRoom?.updatedAt,loadedWorkspace,confirmedRoom]); // eslint-disable-line react-hooks/exhaustive-deps
+      }catch(error){if(valid())setMessage(roomError(error));}
+      finally{if(active&&workspaceKeyRef.current===key)setRestoring(false);}
+    });
+    examinationRefresh.current=refresh;
+    const schedule=(invalidate=true)=>{void refresh.schedule(invalidate).catch(()=>{});};
+    const unsubscribe=subscribeExaminations({getParticipantIds:()=>relevantParticipantIds.current,getKnownExaminationIds:()=>knownExaminationIds.current,onDelete:id=>{deleted.add(id);}},()=>schedule(),status=>{if(status==='SUBSCRIBED')schedule(false);});
+    const focus=()=>schedule(false);const visible=()=>{if(document.visibilityState==='visible')focus();};
+    window.addEventListener('focus',focus);window.addEventListener('online',focus);document.addEventListener('visibilitychange',visible);
+    void refresh.refresh().catch(()=>{});
+    return()=>{active=false;unsubscribe();refresh.dispose();if(examinationRefresh.current===refresh)examinationRefresh.current=null;window.removeEventListener('focus',focus);window.removeEventListener('online',focus);document.removeEventListener('visibilitychange',visible);};
+  },[workspaceKey,demo,current?.id,room,confirmedRoom,applyExamination]); // eslint-disable-line react-hooks/exhaustive-deps
+  const reconciliationSignals=useRef({key:workspaceKey,status,participantId:relevantParticipant,selectedStatus,selectedPresent});
+  useEffect(()=>{
+    const previous=reconciliationSignals.current;
+    reconciliationSignals.current={key:workspaceKey,status,participantId:relevantParticipant,selectedStatus,selectedPresent};
+    if(previous.key!==workspaceKey||demo||!confirmedRoom)return;
+    const roomChanged=previous.status!==status&&(previous.status==='in_progress'||status==='in_progress');
+    const samePerson=previous.participantId===relevantParticipant&&Boolean(relevantParticipant);
+    const examinationStatusChanged=samePerson&&previous.selectedStatus!==selectedStatus&&([previous.selectedStatus,selectedStatus].includes('檢查中')||[previous.selectedStatus,selectedStatus].includes('已完成'));
+    if(roomChanged||examinationStatusChanged||(samePerson&&previous.selectedPresent!==selectedPresent))void examinationRefresh.current?.schedule().catch(()=>{});
+  },[workspaceKey,demo,confirmedRoom,status,relevantParticipant,selectedStatus,selectedPresent]);
   const selectPerson=async(person:Participant|null,history:HistoricalRecord[]=[] )=>{
     if(!hasCurrentAccess()||patientActionsDisabled||locked)return;
     const request=++selectionRequest.current;const key=workspaceKey;
+    historyOwner.current=person?{key,participantId:person.id}:null;
     setSelected(person);setRecords(history);setExamination(null);setItems([]);setMessage('');
     if(!person||demo)return;
     try{
@@ -183,7 +228,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
     if(!current||!selected){setMessage('今日排程查無此受檢者。');return;}
     if(!selected.checkedInAt||!selected.checkinNo){setMessage('此受檢者尚未報到，請先至健檢報到站完成報到。');return;}
     if(!items.length){setMessage('請至少選擇一種超音波項目。');return;}
-    const key=workspaceKey;operationPending.current=true;setShowTimer(false);setBusy(true);setMessage('');
+    const key=workspaceKey;invalidateSelection();operationPending.current=true;setShowTimer(false);setBusy(true);setMessage('');
     try{
       if(demo){const iso=new Date().toISOString();setExamination({id:'demo',participantId:selected.id,roundNo:1,roomId:room,startedAt:iso,completedAt:null,durationSeconds:null,selectedItems:items,actualItems:[],itemCount:0,status:'in_progress'});}
       else{
@@ -197,7 +242,7 @@ export function UltrasoundRoom({current,participants,onChanged=async()=>undefine
   };
   const finish=async()=>{
     if(!hasCurrentAccess()||operationPending.current||patientActionsDisabled||examination?.roomId!==room||!examination||!selected||!actualItems.length)return;
-    const key=workspaceKey;operationPending.current=true;setBusy(true);setMessage('');
+    const key=workspaceKey;invalidateSelection();operationPending.current=true;setBusy(true);setMessage('');
     try{
       if(demo){const iso=new Date().toISOString();setExamination({...examination,status:'completed',completedAt:iso,durationSeconds:Math.max(0,Math.floor((Date.parse(iso)-Date.parse(examination.startedAt!))/1000)),actualItems,itemCount:actualItems.length});}
       else{

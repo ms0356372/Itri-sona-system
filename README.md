@@ -385,3 +385,7 @@ bash scripts/test-room-device-claim-db.sh
 自動測試以 fake timers 或直接建立過期租約驗證，不等待三分鐘；資料庫測試包含同帳號多設備競爭、過期接管、續租、切換 rollback、未完成檢查保護、憑證冒用／hash 重放拒絕及權限邊界。測試使用無網路暫存 PostgreSQL，不連線正式 Supabase。
 
 合併到 `main` 後沿用 GitHub → Supabase Integration 套用 `202610070004_room_device_claim`，確認 migration 成功並更新前端；不需在 SQL Editor 額外手動貼 SQL 或設定設備。正式發布後請用兩台實體平板驗收 claim／release 的 Realtime、短暫斷線及檢查恢復。
+
+## Realtime 效能驗證
+
+訂閱範圍、100ms 查詢合併、Excel lazy load，以及可重現的查詢次數／bundle 前後比較，見 [效能紀錄](docs/realtime-performance.md)。此調整沒有新增 migration；既有租約、權限與操作規則維持。

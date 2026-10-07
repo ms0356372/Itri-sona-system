@@ -69,5 +69,4 @@ export async function parseHistoryFile(file:File,onProgress?:ParseProgress){
   onProgress?.({stage:'headers',processed:0,total:0});await nextFrame();
   const parsed=parseHistorySheet(sheet,file.name,sheetName,(processed,total)=>onProgress?.({stage:'parsing',processed,total}));await nextFrame();return parsed;
 }
-export const isNormalUltrasoundResult=(value:string)=>['無明顯異樣','未見明顯異常','無明顯異常','無異樣'].includes(value.trim());
-export const displayUltrasoundResult=(value:string)=>isNormalUltrasoundResult(value)?'':value;
+export {isNormalUltrasoundResult,displayUltrasoundResult} from './display';
