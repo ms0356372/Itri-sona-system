@@ -30,6 +30,10 @@ export function formatPermissionError(error:unknown):string{
 
 export function friendlyError(error:unknown):string{
   const message=formatError(error);
+  if(message.includes('room_claim_lost'))return '本機已失去此診間的使用權，請重新選擇診間。';
+  if(message.includes('room_claimed'))return '此診間目前正在其他設備使用中。';
+  if(message.includes('heartbeat_failed'))return '診間連線暫時異常，系統將自動重試。';
+  if(/\binvalid_room\b/.test(message))return '此場次沒有這個診間。';
   if(/room_count|session_read_only|room_not_enabled/.test(message))return formatRoomCountError(error);
   if(/invalid login credentials/i.test(message))return 'Email 或密碼不正確。';
   if(/email not confirmed/i.test(message))return '此帳號尚未完成 Email 驗證。';
@@ -53,10 +57,10 @@ export function formatAdditionalExaminationError(error:unknown):string{
 
 export function formatRoomCountError(error:unknown):string{
   const detail=formatError(error);
-  const blocked=detail.match(/room_count_(in_progress|away|unfinished):\s*([^\n]+)/);
+  const blocked=detail.match(/room_count_(in_progress|away|unfinished|claimed):\s*([^\n]+)/);
   if(blocked){
     const room=normalizeRoomId(blocked[2]).replace(' ','');
-    const reason=blocked[1]==='in_progress'?'目前檢查中':blocked[1]==='away'?'目前暫時離開':'有尚未完成的受檢者資料';
+    const reason=blocked[1]==='in_progress'?'目前檢查中':blocked[1]==='away'?'目前暫時離開':blocked[1]==='claimed'?'目前仍由設備使用中':'有尚未完成的受檢者資料';
     return`無法減少診間數量：${room}${reason}。`;
   }
   if(detail.includes('invalid_room_count'))return`超音波診間數量必須為 ${MIN_ROOM_COUNT}～${MAX_ROOM_COUNT} 間的整數。`;

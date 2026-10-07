@@ -269,7 +269,7 @@ Migration 後新增的 Auth User，由 `auth.users` trigger 自動建立三個�
 - **超音波控制台**：`can_console` 才能透過指定 RPC 叫號或修改等候狀態，沒有整張 `participants` 的 UPDATE 權限。
 - **超音波診間**：`can_room` 才能開始／完成檢查、追加檢查、暫時離開／返回診間或讀取檢查時鐘。`rooms` 與 `examinations` 對一般 client 僅開放 SELECT，狀態寫入必須使用 RPC。
 
-目前 13 個對外工作 RPC 的函數內均明確檢查下列權限，直接呼叫 Supabase API 也不能跳過。原有交易鎖、重試冪等、伺服器時間、追加 round、房數安全檢查及歷史保留邏輯維持：
+下列工作 RPC 的函數內均明確檢查頁面權限，直接呼叫 Supabase API 也不能跳過；設備租約相關 RPC 另見下方。原有交易鎖、重試冪等、伺服器時間、追加 round、房數安全檢查及歷史保留邏輯維持：
 
 | RPC | 必要頁面權限 | 操作 |
 |---|---|---|
@@ -287,7 +287,7 @@ Migration 後新增的 Auth User，由 `auth.users` trigger 自動建立三個�
 | `set_room_away` | `can_room` | 暫時離開／返回診間 |
 | `examination_clock` | `can_room` | 伺服器檢查時鐘 |
 
-所有上述權限也要求 `is_active = true`；修改類 RPC 在 `SECURITY DEFINER` 內檢查，`examination_clock` 是同樣檢查 `can_room` 的 `SECURITY INVOKER`。舊版接受裝置時間的開始／完成 overload 已退役，內部 trigger／房號 helper 不授予一般 client EXECUTE。
+所有上述權限也要求 `is_active = true`；修改類 RPC 在 `SECURITY DEFINER` 內檢查，`examination_clock` 是同樣檢查 `can_room` 的 `SECURITY INVOKER`。開始／完成及離開／返回還需證明本機持有該診間的有效租約。舊版不驗設備租約的 overload 已退役，內部 trigger／房號 helper 不授予一般 client EXECUTE。
 
 控制台既有「追加檢查」入口屬於診間操作，所以在控制台使用該按鈕需同時具備 `can_console` **及** `can_room`；console-only 可叫號及調整候檢狀態，但看不到追加按鈕，也不能直接呼叫追加 RPC。room-only 可呼叫追加 RPC，也可在診間開始／完成已排隊的追加 round；目前建立追加項目的 UI 入口仍位於控制台。
 
@@ -330,4 +330,58 @@ bash scripts/test-staff-permissions-db.sh
 npm test -- src/test/staff-permissions-service.test.ts src/test/staff-permissions-app.test.tsx src/test/staff-permissions-sync.test.tsx
 ```
 
-資料庫測試在無網路、無對外連接埠的暫存 PostgreSQL 容器套用全部 migration，驗證既有帳號 backfill、Auth 新帳號／Email trigger、八種 Boolean 組合、停用／缺 row、自己的權限 SELECT、直接 API／欄位寫入拒絕、13 個 RPC gate、實際報到／控制台／診間流程與權限取消後的立即拒絕，並執行房態／房數回歸及六組獨立連線競態；不連線正式 Supabase。前端測試涵蓋預設頁面、Guard、拒絕時不載入資料、Realtime／focus／離線及跨帳號舊回應。正式發布後仍需實體平板驗收登入、權限更新及 Realtime 同步。
+資料庫測試在無網路、無對外連接埠的暫存 PostgreSQL 容器套用全部 migration，驗證既有帳號 backfill、Auth 新帳號／Email trigger、八種 Boolean 組合、停用／缺 row、自己的權限 SELECT、直接 API／欄位寫入拒絕、工作 RPC gate、實際報到／控制台／診間流程與權限取消後的立即拒絕，並執行房態／房數及設備租約回歸與獨立連線競態；不連線正式 Supabase。前端測試涵蓋預設頁面、Guard、拒絕時不載入資料、Realtime／focus／離線及跨帳號舊回應。正式發布後仍需實體平板驗收登入、權限更新及 Realtime 同步。
+
+## 診間設備佔用鎖
+
+同一場次、同一診間同時只能由一台瀏覽器／PWA 持有有效租約。下拉選單顯示「診間 1（本機）」或「診間 2（其他設備使用中）」；其他設備持有的診間不可選取。全部被佔用時停止查詢、選人、檢查及房態操作；等待釋放或逾時後重新選擇。
+
+### 設備識別與資料保存
+
+目前 `registered_devices` 是設備清除流程的 schema，前端尚無穩定設備 ID，因此首次使用以 `crypto.randomUUID()` 建立 `itri-device-id`，另以 `crypto.getRandomValues` 產生 32 bytes 隨機憑證，保存於本機 `itri-device-claim-secret`。重新整理、關閉再開及 PWA 重啟沿用同一份識別；一般畫面不顯示 UUID、Email 或憑證。
+
+增量 migration `supabase/migrations/202610070004_room_device_claim.sql` 在既有 `public.rooms` 加入 `claimed_by_device_id`、`claimed_by_user_id`、`claimed_at`、`claim_expires_at` 及 `claim_secret_hash`，以原 `(session_id, room_id)` 主鍵、完整性 constraint 與設備／期限索引維持單一租約。資料庫只保存憑證的 SHA-256 hash；公開 device UUID 或 hash 都不能代替本機憑證。不同帳號即使使用同一 device ID 也不能替另一個 Auth user 續租。
+
+設備佔用與 `rooms.status` 分開。取得、續租、釋放都不重設 `idle`、`in_progress` 或 `away`；`updated_at` 保持房態時間用途，租約期限由 `claim_expires_at` 記錄。沒有另建第二套診間或設備登錄表，也不修改本機歷年資料、草稿格式或身分證不上雲端的規則。
+
+### 固定租約與原子操作
+
+前端統一設定放在 `src/features/room/claimConfig.ts`：`ROOM_CLAIM_TTL_SECONDS = 180`、`ROOM_CLAIM_HEARTBEAT_SECONDS = 30`、`ROOM_CLAIM_REFRESH_SECONDS = 30`。資料庫 TTL 統一由 `room_claim_ttl_seconds()` 回傳 180；期限使用資料庫時間，前端以伺服器剩餘時間及單調時鐘判定本機期限。
+
+| RPC | 行為 |
+|---|---|
+| `claim_room` | 鎖定場次與房間，在同一交易判斷空房、過期或本機續接；有效的其他設備租約回 `room_claimed` |
+| `switch_room_claim` | 驗證原房所有權，取得目的房後釋放原房；失敗整筆 rollback，原房仍屬本機 |
+| `heartbeat_room_claim` | 僅有效租約的 device＋Auth user＋憑證可續租，期限延長至伺服器當下＋180 秒 |
+| `release_room_claim` | 僅租約擁有者可釋放；帶入取得時間防止延遲的舊請求清掉新租約，檢查中拒絕釋放 |
+| `list_room_claims` | 回傳有效房號的佔用／本機標記、期限及伺服器時間，供選單判斷 |
+
+每個 RPC 都自行檢查 `can_use_room()`、場次、有效房號及需要的所有權；只登入或修改 localStorage 不會取得使用權。一般 client 不能直接 UPDATE claim 欄位。開始檢查、完成檢查及暫時離開／返回也在原有鎖內驗證有效租約，舊版不驗設備的 RPC signature 已移除，不能用直接 API 繞過。
+
+每台設備在同一場次僅能持有一間有效診間，變更必須使用原子切換；不同場次各自隔離。診間數量縮減時，欲停用房間如果仍有有效設備租約也會拒絕，避免移除設備正在使用的房號。過去日期場次不能新增或續租；既有跨日未完成檢查仍可在有效本人租約內依原規則完成，歷史資料維持可讀。
+
+### 離開、斷線與檢查恢復
+
+每 30 秒 heartbeat，`away` 期間也持續續租；暫時離開及返回只變更房態，不釋放租約。檢查中 selector 停用，資料庫也禁止 switch／release，包含房態為 `away` 但仍有未完成檢查的情況。
+
+單次網路失敗顯示同步警告，不立即宣告失去有效租約。權限重新確認或短暫離線時，工作畫面仍依既有 Guard 停止顯示，租約管理保留於 Guard 外，避免普通 focus 或 60 秒斷線意外釋放；重新確認權限後恢復工作畫面。確認撤權、帳號切換或離開診間頁則停止續租。
+
+切換場次、離開診間頁、登出、component unmount 及可處理的 `pagehide` 會嘗試釋放。若檢查中或無法完成釋放，最後一次成功續租後 **180 秒**自然失效；正確性不依賴 unload。背景 visibility 變更不主動釋放，以免 Android 短暫切換應用就失去診間。
+
+租約確定失效後，查詢與診間操作立即停止，要求重新選擇；其他設備取得後，原設備不得續租、完成、離開或返回。異常關機後可由新設備接管過期診間，保留房態與既有進行中 examination，恢復同一筆檢查；原設備的寫入由資料庫擋住。重新開頁時 localStorage 只提供偏好的房號，仍需雲端 claim 成功才能操作。
+
+### 即時同步與驗證
+
+沿用 `rooms` 的 Supabase Realtime，取得／釋放後其他平板會重新讀取 claim；另每 30 秒刷新，因此自然逾時即使沒有資料庫事件，也會在最多約 30 秒內重新判斷可用。重新取得 focus、可見及連線恢復也會重讀；訊息不以 Realtime payload 直接授權。
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+bash scripts/test-room-device-claim-db.sh
+```
+
+自動測試以 fake timers 或直接建立過期租約驗證，不等待三分鐘；資料庫測試包含同帳號多設備競爭、過期接管、續租、切換 rollback、未完成檢查保護、憑證冒用／hash 重放拒絕及權限邊界。測試使用無網路暫存 PostgreSQL，不連線正式 Supabase。
+
+合併到 `main` 後沿用 GitHub → Supabase Integration 套用 `202610070004_room_device_claim`，確認 migration 成功並更新前端；不需在 SQL Editor 額外手動貼 SQL 或設定設備。正式發布後請用兩台實體平板驗收 claim／release 的 Realtime、短暫斷線及檢查恢復。

@@ -31,6 +31,7 @@ vi.mock('../features/roster/db',()=>({clearPreparedSchedule:vi.fn()}));
 vi.mock('../features/checkin/Checkin',()=>({Checkin:({current,participants}:{current:Session|null;participants:Participant[]})=><div data-checkin-session={current?.id??''} data-participant-count={participants.length}>{participants.map(person=><span key={person.id} data-participant-session={person.sessionId}>{person.name}</span>)}</div>}));
 vi.mock('../features/console/Console',()=>({UltrasoundConsole:({current}:{current:Session|null})=><output data-current-room-count={current?.roomCount??4}>控制台場次：{current?.id}</output>}));
 vi.mock('../features/room/UltrasoundRoom',()=>({UltrasoundRoom:({current}:{current:Session|null})=><output data-current-room-count={current?.roomCount??4}>診間場次：{current?.id}</output>}));
+vi.mock('../features/room/useRoomClaims',()=>({useRoomClaims:()=>({roomId:null,claims:[],isOwned:false,claimConfirmed:false,loading:false,busy:false,error:'',warning:'',allOccupied:false,selectRoom:vi.fn(),refresh:vi.fn(),release:async()=>true})}));
 vi.mock('../features/room/RoomStatusOverview',()=>({RoomStatusOverview:({sessionId,roomCount}:{sessionId:string;roomCount?:number|null})=><output data-overview-session={sessionId} data-current-room-count={roomCount??4}/> }));
 vi.mock('../features/sessions/management',()=>({clearSessionSchedule:vi.fn(),deleteSession:vi.fn()}));
 vi.mock('../features/examination/service',()=>({listExaminations:vi.fn()}));

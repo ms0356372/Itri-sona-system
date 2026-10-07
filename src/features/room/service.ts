@@ -1,6 +1,7 @@
 import {requireSupabase} from '../../lib/supabase';
 import type {RoomState} from '../../types';
 import {getRoomCount,getRoomIds,isRoomEnabled,isRoomStatus,normalizeRoomId} from './status';
+import {getDeviceIdentity} from './device';
 
 type RoomRow={session_id:string;room_id:string;status:unknown;updated_at:string};
 
@@ -36,7 +37,8 @@ export async function listRooms(sessionId:string,roomCount?:number|null):Promise
 }
 
 export async function setRoomAway(sessionId:string,roomId:string,away:boolean):Promise<RoomState>{
-  const{data,error}=await requireSupabase().rpc('set_room_away',{p_session_id:sessionId,p_room_id:normalizeRoomId(roomId),p_away:away});
+  const{deviceId,claimSecret}=getDeviceIdentity();
+  const{data,error}=await requireSupabase().rpc('set_room_away',{p_session_id:sessionId,p_room_id:normalizeRoomId(roomId),p_away:away,p_device_id:deviceId,p_device_secret:claimSecret});
   if(error)throw error;
   return mapRoom(data as RoomRow,sessionId);
 }
