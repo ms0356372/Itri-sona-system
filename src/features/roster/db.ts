@@ -2,7 +2,7 @@ import Dexie,{type EntityTable} from 'dexie';
 import {normalizeCompanyName} from '../../lib/company';
 import {normalizeNationalId} from '../../lib/privacy';
 import {assertCompleteImportedPeople,assertUniqueImportedEmployees,previewCompanyMasterUpdate,type MasterUpdateSummary} from './masterImport';
-import type {MasterPerson,PreparedPerson} from './types';
+import type {MasterPerson,PreparedPerson,PreparedUploadMetadata} from './types';
 
 export type StoredPreparedPerson=PreparedPerson&{sessionId:string};
 export type CompanyRosterSettings={companyName:string;companyKey:string;masterLocked:boolean;updatedAt:string};
@@ -11,6 +11,7 @@ export class RosterDatabase extends Dexie {
   masterPeople!:EntityTable<MasterPerson,'id'>;
   preparedPeople!:EntityTable<StoredPreparedPerson,'localId'>;
   companySettings!:EntityTable<CompanyRosterSettings,'companyKey'>;
+  preparedUploads!:EntityTable<PreparedUploadMetadata,'sessionId'>;
   constructor(name='itri-sona-registration'){
     super(name);
     this.version(1).stores({masterPeople:'++id, companyName, employeeNo, name, [companyName+employeeNo]'});
@@ -38,6 +39,7 @@ export class RosterDatabase extends Dexie {
     // without rebuilding people, prepared schedules or company lock settings.
     this.version(7).stores({masterPeople:'++id, companyKey, employeeNo, name, nationalId, [companyKey+employeeNo], [companyKey+nationalId]'}).upgrade(transaction=>
       transaction.table<MasterPerson>('masterPeople').toCollection().modify(person=>{person.nationalId=normalizeNationalId(person.nationalId);}));
+    this.version(8).stores({preparedUploads:'sessionId'});
   }
 }
 
@@ -92,6 +94,13 @@ export async function getPreparedSchedule(sessionId:string):Promise<PreparedPers
   const rows=await rosterDb.preparedPeople.where('sessionId').equals(sessionId).sortBy('sequence');
   return rows.map(row=>{const person={...row};delete (person as Partial<StoredPreparedPerson>).sessionId;return person;});
 }
+export const getPreparedUpload=async(sessionId:string):Promise<PreparedUploadMetadata|null>=>(await rosterDb.preparedUploads.get(sessionId))??null;
+export const savePreparedUpload=(metadata:PreparedUploadMetadata)=>rosterDb.preparedUploads.put(metadata);
+/** Retain a pending reimport warning across reloads without inventing a successful upload. */
+export const setPreparedUploadPendingChanges=(sessionId:string,hasPendingChanges:boolean):Promise<PreparedUploadMetadata|null>=>rosterDb.transaction('rw',rosterDb.preparedUploads,async()=>{
+  await rosterDb.preparedUploads.update(sessionId,{hasPendingChanges});
+  return (await rosterDb.preparedUploads.get(sessionId))??null;
+});
 const sameIdentity=(left:Pick<PreparedPerson,'employeeNo'|'nationalId'|'name'>,right:Pick<PreparedPerson,'employeeNo'|'nationalId'|'name'>)=>left.employeeNo===right.employeeNo&&normalizeNationalId(left.nationalId)===normalizeNationalId(right.nationalId)&&left.name.trim()===right.name.trim();
 const withoutSessionId=(row:StoredPreparedPerson):PreparedPerson=>{const person={...row};delete (person as Partial<StoredPreparedPerson>).sessionId;return person;};
 
@@ -130,5 +139,9 @@ export async function addPreparedPerson(sessionId:string,person:PreparedPerson,m
     return next;
   });
 }
-/** Removes only one day's locally prepared schedule. Company master data and its lock are untouched. */
-export const clearPreparedSchedule=(sessionId:string)=>rosterDb.preparedPeople.where('sessionId').equals(sessionId).delete();
+/** Removes one day's local schedule and upload metadata, preserving other sessions and company data. */
+export const clearPreparedSchedule=(sessionId:string)=>rosterDb.transaction('rw',[rosterDb.preparedPeople,rosterDb.preparedUploads],async()=>{
+  const removed=await rosterDb.preparedPeople.where('sessionId').equals(sessionId).delete();
+  await rosterDb.preparedUploads.delete(sessionId);
+  return removed;
+});

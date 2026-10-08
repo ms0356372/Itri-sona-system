@@ -55,6 +55,7 @@ describe('標準模式每日排程卡片操作',()=>{
     await database.rosterDb.masterPeople.clear();
     await database.rosterDb.companySettings.clear();
     await database.rosterDb.preparedPeople.clear();
+    await database.rosterDb.preparedUploads.clear();
     await database.replaceCompanyMaster(session.companyName,[person]);
     dailyReader.mockReset();download.mockReset();upload.mockReset();
     notices=vi.fn();onUploaded=vi.fn().mockResolvedValue(undefined);
@@ -140,7 +141,7 @@ describe('標準模式每日排程卡片操作',()=>{
     await act(async()=>{finish({inserted:1,skipped:2});});
     await until(()=>onUploaded.mock.calls.length===1);
     expect(onUploaded).toHaveBeenCalledWith('上傳成功：新增 1 筆，略過既有資料 2 筆（未上傳身分證）。');
-    expect(button('確認並上傳今日排程').disabled).toBe(false);
+    expect(button('重新上傳今日排程').disabled).toBe(false);
     expect(await database.getPreparedSchedule(session.id)).toEqual([prepared]);
   });
 
@@ -168,6 +169,7 @@ describe('標準模式每日排程卡片操作',()=>{
     upload.mockResolvedValueOnce({inserted:0,skipped:1});
     await click(button('確認並上傳今日排程'));
     expect(upload).toHaveBeenCalledTimes(2);
+    await until(()=>onUploaded.mock.calls.length===1);
     expect(onUploaded).toHaveBeenCalledWith('上傳成功：新增 0 筆，略過既有資料 1 筆（未上傳身分證）。');
   });
 

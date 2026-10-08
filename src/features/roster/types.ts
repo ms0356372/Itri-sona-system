@@ -42,3 +42,12 @@ export interface PreparedPerson {
 }
 
 export interface MatchResult { ready: PreparedPerson[]; pending: PreparedPerson[] }
+
+/** Last successful standard schedule upload, retained only on this device. */
+export interface PreparedUploadMetadata {
+  sessionId: string;
+  lastUploadedAt: string;
+  lastUploadedCount: number;
+  uploadedPreparedSignature: string;
+  hasPendingChanges?: boolean;
+}
