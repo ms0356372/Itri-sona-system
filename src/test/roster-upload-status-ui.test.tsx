@@ -215,6 +215,25 @@ describe('標準每日排程的持續上傳狀態',()=>{
     expect(button('重新上傳今日排程').disabled).toBe(false);
   });
 
+  it('本機成功 metadata 無法儲存後重新匯入，仍保留記憶體中的成功資訊與內容比較',async()=>{
+    await seed();
+    vi.spyOn(database,'savePreparedUpload').mockRejectedValueOnce(new Error('本機空間不足'));
+    upload.mockResolvedValueOnce({inserted:1,skipped:0});
+    await click(button('確認並上傳今日排程'));
+    await until(()=>onUploaded.mock.calls.length===1);
+    vi.setSystemTime(new Date('2026-10-08T04:07:00Z'));
+    await importDaily([daily]);
+    expect(status()?.textContent).toBe('✓ 已上傳 1 筆・11:36');
+    expect(button('重新上傳今日排程').disabled).toBe(false);
+    expect(await database.getPreparedUpload(session.id)).toBeNull();
+    await importDaily([daily,otherDaily]);
+    expect(status()?.textContent).toBe('⚠ 排程內容已變更，請重新上傳');
+    expect(status()?.getAttribute('title')).toBe('上次成功上傳 1 筆・11:36');
+    expect(button('重新上傳今日排程').disabled).toBe(false);
+    expect(await database.getPreparedUpload(session.id)).toBeNull();
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
   it('simple 即使已有上傳 metadata 也不顯示每日上傳狀態或載入該資料',async()=>{
     await database.savePreparedUpload({sessionId:session.id,lastUploadedAt:'2026-10-08T03:36:00.000Z',lastUploadedCount:1,uploadedPreparedSignature:preparedScheduleSignature([prepared])});
     const getUpload=vi.spyOn(database,'getPreparedUpload');
