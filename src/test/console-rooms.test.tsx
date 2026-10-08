@@ -456,14 +456,14 @@ describe('超音波控制台診間狀態',()=>{
     expect(Array.from(container.querySelectorAll('button')).find(value=>value.textContent==='叫號')?.disabled).toBe(false);
   });
 
-  it('簡易控制台按數字號碼排序，沒有組別、時段與A～G篩選，保留原工作欄位',async()=>{
+  it('簡易控制台同狀態內按數字號碼排序，沒有組別、時段與A～G篩選，保留原工作欄位',async()=>{
     const simple={...session,workflowMode:'simple' as const};
     await render([
       person({id:'number-10',name:'十號',groupCode:null,slot:null,checkinNo:'10',queueNumber:10,status:'等候中'}),
       person({id:'number-2',name:'二號',groupCode:null,slot:null,checkinNo:'2',queueNumber:2,status:'等候中'}),
       person({id:'number-1',name:'一號',groupCode:null,slot:null,checkinNo:'1',status:'等候中'}),
     ],simple);
-    expect(Array.from(container.querySelectorAll('thead th')).map(cell=>cell.textContent)).toEqual(['號碼','姓名／工號','方案／本輪項目','診間','狀態','完成件數','現場操作']);
+    expect(Array.from(container.querySelectorAll('thead th')).map(cell=>cell.querySelector('button')?.getAttribute('aria-label')??cell.textContent)).toEqual(['號碼','姓名／工號','方案／本輪項目','診間','狀態','完成件數','現場操作']);
     expect(Array.from(container.querySelectorAll<HTMLTableRowElement>('tbody tr')).map(row=>row.cells[0].textContent)).toEqual(['1','2','10']);
     for(const label of ['全部','A','B','C','D','E','F','G'])expect(button(label)).toBeUndefined();
     expect(roomGroup().querySelectorAll('[role="img"]')).toHaveLength(4);
