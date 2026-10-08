@@ -25,13 +25,13 @@ describe('簡易模式沿用 Company Master 管理',()=>{
     const prepared=vi.spyOn(roster,'getPreparedSchedule');await render({...base,workflowMode:'simple'});
     expect(container.textContent).toContain('公司大名單管理');expect(container.textContent).toContain('已匯入 1 筆');
     expect(container.querySelector('input[type=file]')).not.toBeNull();
-    for(const label of ['每日排程','我們整理後的排程','確認並上傳今日排程','預覽完成，下載 Excel','新增全新人員'])expect(container.textContent).not.toContain(label);
+    for(const label of ['每日排程','我們整理後的排程','確認並上傳今日排程','匯出整理後 Excel','新增全新人員'])expect(container.textContent).not.toContain(label);
     expect(prepared).not.toHaveBeenCalled();expect(await roster.isCompanyMasterLocked('ITRI')).toBe(true);
   });
 
   it('舊場次缺mode與明確standard的UI相同，完整標準步驟繼續存在',async()=>{
     const prepared=vi.spyOn(roster,'getPreparedSchedule');await render(base);
-    for(const label of ['名單整理與上傳','廠商提供資料（每日排程）','我們整理後的排程','確認並上傳今日排程','預覽完成，下載 Excel'])expect(container.textContent).toContain(label);
+    for(const label of ['名單整理與上傳','廠商提供資料（每日排程）','我們整理後的排程','確認並上傳今日排程','匯出整理後 Excel'])expect(container.textContent).toContain(label);
     expect(prepared).toHaveBeenCalledWith(base.id);const original=container.innerHTML;
     await render({...base,workflowMode:'standard'});expect(container.innerHTML).toBe(original);
   });
