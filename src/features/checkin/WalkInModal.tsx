@@ -7,8 +7,10 @@ import type {Participant, Session} from '../../types';
 import {getPreparedSchedule} from '../roster/db';
 import {makePreparedFromMaster} from '../roster/match';
 import type {MasterPerson, PreparedPerson} from '../roster/types';
-import {SLOT_GROUP} from '../schedule/rules';
+import {groupForSlot,SLOT_GROUP} from '../schedule/rules';
 import {registerAndCheckIn, WalkInRegistrationError} from './walkin';
+import {isCompleteNationalId} from './lookup';
+import {DEFAULT_MANUAL_ITEM,manualIdentityError,normalizeManualFields} from './manual';
 
 export type WalkInCandidate = {
   nationalId: string;
@@ -31,10 +33,10 @@ export function WalkInModal({session, candidate, onClose, onComplete}: Props) {
     companyKey: normalizeCompanyName(session.companyName),
     employeeNo: existing?.employeeNo ?? '',
     name: existing?.name ?? '',
-    nationalId: normalizeNationalId(candidate.nationalId),
+    nationalId: normalizeNationalId(candidate.nationalId||existing?.nationalId),
     gender: existing?.gender ?? '',
     originalActivity: existing?.originalActivity ?? '',
-    item: existing?.item ?? '',
+    item: existing?existing.item:DEFAULT_MANUAL_ITEM,
     extension: existing?.extension ?? '',
     updatedAt: new Date().toISOString(),
   }));
@@ -48,17 +50,22 @@ export function WalkInModal({session, candidate, onClose, onComplete}: Props) {
   // Keep one local identity across deliberate retries after partial network failures.
   const localId = useRef(candidate.prepared?.localId ?? crypto.randomUUID());
   useEffect(() => {mounted.current = true; return () => {mounted.current = false;};}, []);
-  const complete = [person.employeeNo, person.name, person.nationalId, person.gender, person.item, slot]
-    .every(value => value.trim());
+  const validationSource=retained??person;
+  const validationSlot=retained?.slot??slot;
+  const validationError=manualIdentityError(validationSource)||(!groupForSlot(validationSlot)?'請選擇有效的排程時段。':'');
+  const complete=!validationError&&Boolean(validationSource.item.trim()||(!existing&&!retained));
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (submitting.current || !complete) return;
+    if (submitting.current) return;
+    if(validationError){setError(validationError);return;}
+    if(!complete){setError('請確認檢查項目。');return;}
     submitting.current = true;
     setBusy(true);
     setError('');
     try {
-      const source = {...person, originalActivity: person.originalActivity || person.item};
+      const fields=!existing&&!retained?normalizeManualFields(person):person;
+      const source = {...fields, originalActivity: fields.originalActivity || fields.item};
       const row = retained ?? {
         ...makePreparedFromMaster(source, session.sessionDate, slot, 1),
         localId: localId.current,
@@ -106,7 +113,7 @@ export function WalkInModal({session, candidate, onClose, onComplete}: Props) {
         <h2 className="text-xl font-black">{title}</h2>
         <button type="button" className="secondary min-h-10 px-3" aria-label="關閉新增視窗" disabled={busy} onClick={onClose}><X/></button>
       </header>
-      <form className="space-y-5 p-5" onSubmit={event => void submit(event)}>
+      <form className="space-y-5 p-5" noValidate onSubmit={event => void submit(event)}>
         {retained && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
           本機排程已保留，請重試雲端同步與報到；已保存的人員資料與排程時段會沿用。
         </p>}
@@ -118,13 +125,13 @@ export function WalkInModal({session, candidate, onClose, onComplete}: Props) {
           <dt>項目</dt><dd>{person.item}</dd>
           <dt>院內分機</dt><dd>{person.extension || '未填寫'}</dd>
         </dl> : <div className="grid gap-3 sm:grid-cols-2">
-          <label><span className="label">身分證</span><input className="input" value={person.nationalId} readOnly required/></label>
+          <label><span className="label">身分證</span><input className="input" value={person.nationalId} readOnly={isCompleteNationalId(candidate.nationalId)} required disabled={busy}
+            onChange={event=>setPerson(previous=>({...previous,nationalId:normalizeNationalId(event.target.value)}))}/></label>
           {field('name', '姓名')}{field('employeeNo', '工號')}
-          {field('gender', '性別')}{field('item', '項目')}
+          {field('gender', '性別（選填）',false)}{field('item', '項目',false)}
           {field('extension', '院內分機（選填）', false)}
         </div>}
         <div className="grid gap-3 sm:grid-cols-2">
-          <label><span className="label">排程日期</span><input className="input" type="date" value={session.sessionDate} readOnly/></label>
           <label><span className="label">排程時段</span>
             <select className="input" value={slot} required disabled={busy || Boolean(retained)} onChange={event => setSlot(event.target.value)}>
               {Object.keys(SLOT_GROUP).map(value => <option key={value} value={value}>{value.replace('~', '～')}</option>)}

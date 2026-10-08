@@ -93,6 +93,20 @@ describe('現場單筆新增並報到',()=>{
     expect(result.employeeNo).toBe('00125');expect(state.rows).toHaveLength(1);expect(await getCompanyMaster('ITRI')).toEqual([]);expect(await getPreparedSchedule(session.id)).toHaveLength(2);
   });
 
+  it.each([false,true])('人工新增性別、分機空白可沿用 A～G 報到並保留空字串；加入大名單 %s',async addToMaster=>{
+    const{state,client}=remote();
+    if(addToMaster)await replaceCompanyMaster('ITRI',[master({employeeNo:'other',nationalId:'B123456789',name:'原人員'})]);
+    const result=await registerAndCheckIn(session,prepared({employeeNo:' 00125 ',name:' 王小明 ',gender:'   ',extension:'   '}),addToMaster);
+    expect(result).toMatchObject({employeeNo:'00125',name:'王小明',gender:'',plannedItems:['一般'],checkinNo:'A1',status:'等候中'});
+    expect(state.payloads[0]).toMatchObject({employee_no:'00125',full_name:'王小明',gender:'',planned_items:['一般'],group_code:'A',schedule_slot:'07:30~08:00',note:''});
+    expect(JSON.stringify(state.payloads)).not.toContain('A123456789');expect(client.rpc).toHaveBeenCalledWith('check_in_participant',{p_participant_id:'cloud-1'});
+    expect((await getPreparedSchedule(session.id))[0]).toMatchObject({employeeNo:'00125',gender:'',extension:'',scheduleDate:session.sessionDate,item:'一般'});
+    if(addToMaster){
+      expect(await getCompanyMaster('ITRI')).toContainEqual(expect.objectContaining({employeeNo:'00125',gender:'',extension:'',item:'一般',originalActivity:'一般'}));
+      expect(await isCompanyMasterLocked('ITRI')).toBe(true);
+    }else expect(await getCompanyMaster('ITRI')).toEqual([]);
+  });
+
   it('勾選同時加入公司大名單會補 originalActivity 並維持鎖定',async()=>{
     remote();await replaceCompanyMaster('ITRI',[master({employeeNo:'other',nationalId:'B123456789',name:'原人員'})]);
     await registerAndCheckIn(session,prepared(),true);
@@ -182,6 +196,19 @@ describe('現場單筆新增並報到',()=>{
     expect(result.checkinNo).toBe('A1');expect(state.payloads).toHaveLength(1);expect(await getPreparedSchedule(session.id)).toHaveLength(1);expect(state.assignments).toBe(1);expect(client.rpc).toHaveBeenCalledTimes(2);
   });
 
+  it('已保存的空白性別及原項目、時段在雲端失敗後重試仍完整保留',async()=>{
+    const{state}=remote();state.insertError={message:'network disconnected'};
+    const person=prepared({gender:'',item:'原有專案',slot:'09:00~09:30',originalActivity:'原始活動'});
+    const error:unknown=await registerAndCheckIn(session,person,false).catch(reason=>reason);
+    expect(error).toBeInstanceOf(WalkInRegistrationError);
+    if(!(error instanceof WalkInRegistrationError))throw new Error('Expected a retained registration error');
+    const stored=(await getPreparedSchedule(session.id))[0];expect(error.retained).toEqual(stored);
+    expect(stored).toMatchObject({gender:'',item:'原有專案',slot:'09:00~09:30',originalActivity:'原始活動'});
+    state.insertError=null;const result=await registerAndCheckIn(session,error.retained,false);
+    expect(result).toMatchObject({gender:'',plannedItems:['原有專案'],slot:'09:00~09:30',checkinNo:'D1'});
+    expect(await getPreparedSchedule(session.id)).toEqual([stored]);expect(state.assignments).toBe(1);
+  });
+
   it('RPC 已提交但回應斷線，重試不再 RPC 且保留原號碼與狀態',async()=>{
     const{state,client}=remote();state.rpcError={message:'network disconnected'};state.commitBeforeRpcError=true;state.postCheckinStatus='已叫號';const person=prepared();
     await expect(registerAndCheckIn(session,person,false)).rejects.toThrow(/尚無法確認報到/);
@@ -207,12 +234,21 @@ describe('現場單筆新增並報到',()=>{
     {scheduleDate:'2026-10-07'},
     {name:''},
     {employeeNo:''},
-    {gender:''},
     {item:''},
     {slot:'11:00~11:30'},
     {nationalId:'A123'},
   ])('驗證必要欄位、完整身分證與固定場次日期在所有寫入前完成 %#',async changes=>{
     const{state,client}=remote();await expect(registerAndCheckIn(session,prepared(changes),false)).rejects.toThrow();
+    expect(await getPreparedSchedule(session.id)).toEqual([]);expect(state.payloads).toEqual([]);expect(client.rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {changes:{name:'   '},message:'請輸入姓名。'},
+    {changes:{employeeNo:'   '},message:'請輸入工號。'},
+    {changes:{nationalId:'A123'},message:'請確認完整且格式正確的身分證。'},
+    {changes:{slot:'11:00~11:30'},message:'請選擇有效的排程時段。'},
+  ])('人工新增欄位錯誤回傳明確訊息 $message 且不寫入或呼叫 RPC',async({changes,message})=>{
+    const{state,client}=remote();await expect(registerAndCheckIn(session,prepared(changes),false)).rejects.toThrow(message);
     expect(await getPreparedSchedule(session.id)).toEqual([]);expect(state.payloads).toEqual([]);expect(client.rpc).not.toHaveBeenCalled();
   });
 

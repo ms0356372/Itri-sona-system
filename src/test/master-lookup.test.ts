@@ -69,17 +69,17 @@ describe('Company Master indexed lookup',()=>{
   });
 
   it('既有人員不被人工重試覆寫，身分衝突不寫入',async()=>{
-    const stored=await ensureCompanyMasterPerson(person());
-    expect(await ensureCompanyMasterPerson(person({item:'人工填入另一項目',gender:'女',extension:''}))).toEqual(stored);
+    const stored=await ensureCompanyMasterPerson(person({item:'特殊方案',gender:'女',extension:'5678'}));
+    expect(await ensureCompanyMasterPerson(person({item:'',gender:'',extension:''}))).toEqual(stored);
     await expect(ensureCompanyMasterPerson(person({nationalId:'B234567890'}))).rejects.toThrow('此工號已存在');
     await expect(ensureCompanyMasterPerson(person({employeeNo:'99999'}))).rejects.toThrow('此身分證已存在');
     await expect(ensureCompanyMasterPerson(person({name:'另一人'}))).rejects.toThrow('人員資料不同');
     expect(await rosterDb.masterPeople.count()).toBe(1);expect(await lookupCompanyMaster('ITRI',{employeeNo:'00125'})).toEqual(stored);
   });
 
-  it.each(['employeeNo','name','gender','item'] as const)('人工新增必要欄位 %s 空白時拒絕且不改lock',async field=>{
+  it.each([['employeeNo','請輸入工號。'],['name','請輸入姓名。']] as const)('人工新增必要欄位 %s 空白時拒絕且不改lock',async(field,message)=>{
     await setCompanyMasterLocked('ITRI',false);const settings=await rosterDb.companySettings.get('ITRI');
-    await expect(ensureCompanyMasterPerson(person({[field]:'　 '}))).rejects.toThrow('皆為必填');
+    await expect(ensureCompanyMasterPerson(person({[field]:'　 '}))).rejects.toThrow(message);
     expect(await rosterDb.masterPeople.count()).toBe(0);expect(await rosterDb.companySettings.get('ITRI')).toEqual(settings);
   });
 

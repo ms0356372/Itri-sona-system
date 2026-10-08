@@ -11,7 +11,9 @@ export type SimplePerson=Pick<MasterPerson,'employeeNo'|'name'|'gender'|'item'|'
 export function simpleCloudArguments(session:Session,source:SimplePerson){
   if(!isSimpleSession(session)||session.status!=='active')throw new Error('請先選擇可報到的簡易模式場次。');
   const person={employeeNo:source.employeeNo.trim(),name:source.name.trim(),gender:source.gender.trim(),item:source.item.trim(),extension:source.extension.trim()};
-  if(!person.employeeNo||!person.name||!person.gender||!person.item)throw new Error('姓名、工號、性別與項目皆為必填。');
+  if(!person.name)throw new Error('請輸入姓名。');
+  if(!person.employeeNo)throw new Error('請輸入工號。');
+  if(!person.item)throw new Error('受檢者項目不可空白，請確認人員資料。');
   if(Object.values(person).some(value=>/[A-Z](?:[1289]\d{8}|[A-D]\d{8})/i.test(value.normalize('NFKC').replace(/[\s-]/g,'')))){
     throw new Error('身分證僅保留本機；上傳欄位不可包含完整身分證，請確認姓名、工號、項目與分機。');
   }
@@ -22,7 +24,7 @@ export function simpleError(error:unknown):string{
   const detail=friendlyError(error);
   const messages:Record<string,string>={
     simple_identity_conflict:'此工號已有報到紀錄，但人員資料不同，請工作人員確認。',
-    invalid_simple_participant:'姓名、工號、性別與項目皆為必填。',
+    invalid_simple_participant:'受檢者資料不完整，請確認姓名、工號與項目。',
     invalid_workflow_mode:'場次模式不符，請重新選擇簡易模式場次。',
     session_not_active:'此場次目前無法報到，請重新選擇有效場次。',
     session_not_found:'找不到此場次，請重新整理後再試。',

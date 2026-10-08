@@ -3,6 +3,7 @@ import {createRoot,type Root} from 'react-dom/client';
 import Dexie from 'dexie';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {Checkin} from '../features/checkin/Checkin';
+import {WalkInModal} from '../features/checkin/WalkInModal';
 import {registerAndCheckIn,WalkInRegistrationError} from '../features/checkin/walkin';
 import * as database from '../features/roster/db';
 import type {MasterPerson,PreparedPerson} from '../features/roster/types';
@@ -63,7 +64,7 @@ async function openNew(){await render();await scan();await until(()=>modal()!==n
 async function fillNew(){
   await input(field('姓名'),'王小明');
   await input(field('工號'),'00125');
-  await input(field('性別'),'男');
+  await input(field('性別（選填）'),'男');
   await input(field('項目'),'腹部超音波');
 }
 async function snapshot(){
@@ -109,9 +110,9 @@ describe('手動報到與現場新增操作',()=>{
     await until(()=>modal()!==null);
     expect(modal()?.getAttribute('aria-label')).toBe('加入今日排程');
     for(const value of ['王小明','00125','男','A123456789','腹部超音波','1234'])expect(modal()?.textContent).toContain(value);
-    expect(modal()?.querySelectorAll('input')).toHaveLength(1);
-    expect(field('排程日期').readOnly).toBe(true);
-    expect(field('排程日期').value).toBe(session.sessionDate);
+    expect(modal()?.querySelectorAll('input')).toHaveLength(0);
+    expect(modal()?.querySelector('input[type="date"]')).toBeNull();
+    expect(modal()?.textContent).not.toContain('排程日期');
     expect(modal()?.querySelector('input[type="checkbox"]')).toBeNull();
     const slot=modal()!.querySelector<HTMLSelectElement>('select')!;
     expect(slot.disabled).toBe(false);
@@ -124,27 +125,73 @@ describe('手動報到與現場新增操作',()=>{
     expect(register).toHaveBeenCalledWith(session,expect.objectContaining({employeeNo:'00125',name:'王小明',nationalId:'A123456789',scheduleDate:session.sessionDate,slot:'09:00~09:30',item:'腹部超音波',extension:'1234',originalActivity:'員工健檢活動'}),false);
   });
 
-  it('未知身分證開啟新增視窗，身分證及日期固定、必填欄位完整才可送出',async()=>{
+  it('未知身分證帶入新增視窗，日期不顯示、姓名與工號必填而性別分機可空',async()=>{
     await openNew();
     expect(modal()?.getAttribute('aria-label')).toBe('新增受檢者');
     expect(field('身分證').value).toBe('A123456789');
     expect(field('身分證').readOnly).toBe(true);
-    expect(field('排程日期').value).toBe(session.sessionDate);
-    expect(field('排程日期').readOnly).toBe(true);
+    expect(modal()?.querySelector('input[type="date"]')).toBeNull();
+    expect(modal()?.textContent).not.toContain('排程日期');
     const checkbox=modal()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     expect(checkbox.checked).toBe(false);
-    for(const label of ['姓名','工號','性別','項目'])expect(field(label).required).toBe(true);
+    for(const label of ['姓名','工號'])expect(field(label).required).toBe(true);
+    expect(field('性別（選填）').required).toBe(false);expect(field('性別（選填）').value).toBe('');
+    expect(field('項目').required).toBe(false);expect(field('項目').value).toBe('一般');
     expect(field('院內分機（選填）').required).toBe(false);
     expect(button('新增並報到').disabled).toBe(true);
     await click(button('新增並報到'));
     expect(register).not.toHaveBeenCalled();
-    for(const [label,value] of [['姓名','王小明'],['工號','00125'],['性別','男']])await input(field(label),value);
-    expect(button('新增並報到').disabled).toBe(true);
+    for(const [label,value] of [['姓名','王小明'],['工號','00125']])await input(field(label),value);
+    expect(button('新增並報到').disabled).toBe(false);
     await input(field('項目'),'腹部超音波');
     expect(button('新增並報到').disabled).toBe(false);
     await input(field('姓名'),'   ');
     expect(button('新增並報到').disabled).toBe(true);
     expect(await snapshot()).toEqual({master:[],schedule:[],settings:[]});
+  });
+
+  it.each([false,true])('新建人員性別與分機空白可送出，清空項目仍回填一般且保留工號前導零；加入大名單 %s',async addToMaster=>{
+    await openNew();await input(field('姓名'),' 王小明 ');await input(field('工號'),' 00125 ');
+    await input(field('項目'),'   ');await input(field('性別（選填）'),'   ');
+    if(addToMaster)await click(modal()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!);
+    expect(button('新增並報到').disabled).toBe(false);
+    await click(button('新增並報到'));await until(()=>modal()===null);
+    expect(register).toHaveBeenCalledWith(session,expect.objectContaining({
+      nationalId:'A123456789',employeeNo:'00125',name:'王小明',gender:'',extension:'',item:'一般',
+      originalActivity:'一般',dailyActivity:'一般',scheduleDate:session.sessionDate,slot:'07:30~08:00',
+    }),addToMaster);
+  });
+
+  it.each([
+    {label:'姓名',message:'請輸入姓名。'},
+    {label:'工號',message:'請輸入工號。'},
+  ])('$label 只有空白時禁止送出並顯示明確錯誤',async({label,message})=>{
+    await openNew();await input(field('姓名'),'王小明');await input(field('工號'),'00125');await input(field(label),'   ');
+    expect(button('新增並報到').disabled).toBe(true);
+    await act(async()=>{modal()!.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
+    expect(modal()?.querySelector('[role="alert"]')?.textContent).toBe(message);expect(register).not.toHaveBeenCalled();
+  });
+
+  it('沒有掃描身分證的新增入口允許輸入，無效格式禁止送出且有效格式才可新增',async()=>{
+    const onComplete=vi.fn();
+    await act(async()=>{root.render(<WalkInModal session={session} candidate={{nationalId:''}} onClose={vi.fn()} onComplete={onComplete}/>);});
+    expect(field('身分證').readOnly).toBe(false);expect(field('身分證').required).toBe(true);
+    await input(field('姓名'),'王小明');await input(field('工號'),'00125');await input(field('身分證'),'A123');
+    expect(button('新增並報到').disabled).toBe(true);
+    await act(async()=>{modal()!.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
+    expect(modal()?.querySelector('[role="alert"]')?.textContent).toBe('請確認完整且格式正確的身分證。');expect(register).not.toHaveBeenCalled();
+    await input(field('身分證'),'a123456789');expect(button('新增並報到').disabled).toBe(false);
+    await click(button('新增並報到'));expect(register).toHaveBeenCalledWith(session,expect.objectContaining({nationalId:'A123456789',item:'一般'}),false);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it('保留標準模式有效排程時段要求，無效值不可送出',async()=>{
+    await openNew();await input(field('姓名'),'王小明');await input(field('工號'),'00125');
+    const slot=modal()!.querySelector<HTMLSelectElement>('select')!;expect(slot.required).toBe(true);
+    await act(async()=>{slot.value='';slot.dispatchEvent(new Event('change',{bubbles:true}));});
+    expect(button('新增並報到').disabled).toBe(true);
+    await act(async()=>{modal()!.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
+    expect(modal()?.querySelector('[role="alert"]')?.textContent).toBe('請選擇有效的排程時段。');expect(register).not.toHaveBeenCalled();
   });
 
   it.each([false,true])('成功新增顯示完整報到結果並可掃描下一位；加入大名單選擇為 %s',async addToMaster=>{

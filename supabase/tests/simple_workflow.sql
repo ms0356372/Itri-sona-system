@@ -112,8 +112,8 @@ select pg_temp.expect_simple_error($sql$select public.simple_check_in_participan
 select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000001','','空工號','男','一般')$sql$,'invalid_simple_participant');
 select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000001','EMPTY',' ','男','一般')$sql$,'invalid_simple_participant');
 select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000001','EMPTY','空項目','男',' ')$sql$,'invalid_simple_participant');
-select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000001','EMPTYGENDER','空性別',' ','一般')$sql$,'invalid_simple_participant');
-select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000001','NULLGENDER','空性別',null,'一般')$sql$,'invalid_simple_participant');
+-- Optional gender normalization is exercised in manual_optional_gender.sql on
+-- isolated sessions, preserving this suite's original queue/counter assertions.
 select pg_temp.expect_simple_error($sql$select public.simple_check_in_participant('b5100000-0000-0000-0000-000000000003','STANDARD','Standard','男','一般')$sql$,'invalid_workflow_mode');
 -- Registration follows the existing active-session boundary. Room operations
 -- retain their separate deployed today/lease checks without changing check-in.

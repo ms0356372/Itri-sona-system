@@ -52,7 +52,7 @@ async function scan(id='A123456789'){
   await submit(field('簡易報到身分證').form!);
 }
 async function fillNew(){
-  for(const [label,value] of [['新增身分證','A123456789'],['新增姓名','王小明'],['新增工號','00125'],['新增性別','男'],['新增項目','一般']])await input(field(label),value);
+  for(const [label,value] of [['新增身分證','A123456789'],['新增姓名','王小明'],['新增工號','00125'],['新增性別（選填）','男'],['新增項目','一般']])await input(field(label),value);
 }
 
 describe('簡易模式本機查人與確認報到',()=>{
@@ -161,9 +161,9 @@ describe('簡易模式本機查人與確認報到',()=>{
   });
 
   it('新增必填與身分證驗證失敗不寫本機或雲端，取消保留大名單',async()=>{
-    await render();await click(button('新增受檢者'));await fillNew();await input(field('新增性別'),' ');
-    await submit(manual()!);expect(container.textContent).toContain('必填');expect(remote.rpc).not.toHaveBeenCalled();
-    await input(field('新增性別'),'男');await input(field('新增身分證'),'A123');await submit(manual()!);
+    await render();await click(button('新增受檢者'));await fillNew();await input(field('新增姓名'),' ');
+    await submit(manual()!);expect(container.textContent).toContain('請輸入姓名。');expect(remote.rpc).not.toHaveBeenCalled();
+    await input(field('新增姓名'),'王小明');await input(field('新增身分證'),'A123');await submit(manual()!);
     expect(container.textContent).toContain('完整且格式正確的身分證');await click(button('取消'));
     expect(manual()).toBeNull();expect(await database.rosterDb.masterPeople.count()).toBe(0);
   });
@@ -191,5 +191,72 @@ describe('簡易模式本機查人與確認報到',()=>{
     else await render(change==='switch'?{...session,id:'another-session'}:{...session,status:'closing'});
     await act(async()=>{finish({data:row(),error:null});});
     expect(container.querySelector('dl')).toBeNull();expect(notices).not.toHaveBeenCalled();expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('掃描進入帶入唯讀身分證，只需姓名和工號；日期和時段完全不顯示',async()=>{
+    await render();await scan('a123456789');await until(()=>Boolean(container.textContent?.includes('公司大名單查無此受檢者。')));
+    await click(button('新增受檢者'));
+    expect(field('新增身分證').value).toBe('A123456789');expect(field('新增身分證').readOnly).toBe(true);
+    expect(field('新增項目').value).toBe('一般');expect(field('新增性別（選填）').value).toBe('');
+    for(const label of ['新增身分證','新增姓名','新增工號'])expect(field(label).required).toBe(true);
+    for(const label of ['新增性別（選填）','新增項目','新增院內分機（選填）'])expect(field(label).required).toBe(false);
+    expect(Array.from(manual()!.querySelectorAll('.label')).map(element=>element.textContent))
+      .toEqual(['身分證','姓名','工號','性別（選填）','項目','院內分機（選填）']);
+    expect(manual()!.textContent).not.toMatch(/排程日期|排程時段/);expect(manual()!.querySelector('select,input[type=date]')).toBeNull();
+    expect(button('新增並報到').disabled).toBe(true);
+    await input(field('新增姓名'),'王小明');await input(field('新增工號'),'00125');
+    expect(button('新增並報到').disabled).toBe(false);
+  });
+
+  it.each([false,true])('僅姓名、工號、身分證即可新增報到，性別與分機保持空字串，加入大名單=%s',async addToMaster=>{
+    await database.setCompanyMasterLocked('ITRI',true);const settings=await database.rosterDb.companySettings.toArray();
+    remote.rpc.mockResolvedValue({data:row({gender:'',note:''}),error:null});
+    await render();await click(button('新增受檢者'));
+    expect(field('新增身分證').readOnly).toBe(false);await input(field('新增身分證'),'a123456789');
+    await input(field('新增姓名'),' 王小明 ');await input(field('新增工號'),' 00125 ');
+    if(addToMaster)await click(manual()!.querySelector<HTMLInputElement>('input[type=checkbox]')!);
+    await click(button('新增並報到'));await until(()=>detail('號碼')==='1');
+    expect(remote.rpc).toHaveBeenCalledExactlyOnceWith('simple_check_in_participant',{
+      p_session_id:session.id,p_employee_no:'00125',p_full_name:'王小明',p_gender:'',p_item:'一般',p_extension:'',
+    });
+    expect(detail('性別')).toBe('');expect(detail('項目')).toBe('一般');expect(detail('目前狀態')).toBe('等候中');
+    expect(await database.rosterDb.companySettings.toArray()).toEqual(settings);
+    expect(await database.rosterDb.preparedPeople.count()).toBe(0);
+    const people=await database.getCompanyMaster('ITRI');expect(people).toHaveLength(addToMaster?1:0);
+    if(addToMaster)expect(people[0]).toMatchObject({employeeNo:'00125',nationalId:'A123456789',gender:'',item:'一般',originalActivity:'一般',extension:''});
+    expect(JSON.stringify(remote.rpc.mock.calls)).not.toContain('A123456789');
+  });
+
+  it.each(['','   '])('新建人員項目清空後回填一般，性別空白不妨礙送出：%j',async item=>{
+    remote.rpc.mockResolvedValue({data:row({gender:'',note:''}),error:null});
+    await render();await click(button('新增受檢者'));await input(field('新增身分證'),'A123456789');
+    await input(field('新增姓名'),'王小明');await input(field('新增工號'),'00125');await input(field('新增項目'),item);
+    expect(button('新增並報到').disabled).toBe(false);await submit(manual()!);await until(()=>detail('號碼')==='1');
+    expect(remote.rpc).toHaveBeenCalledWith('simple_check_in_participant',expect.objectContaining({p_item:'一般',p_gender:'',p_extension:''}));
+  });
+
+  it.each([
+    ['新增姓名','請輸入姓名。'],['新增工號','請輸入工號。'],
+  ])('必填資料只有空白時停用送出並回報具體原因：%s',async(label,message)=>{
+    await render();await click(button('新增受檢者'));await fillNew();await input(field(label),' ');
+    expect(button('新增並報到').disabled).toBe(true);await submit(manual()!);
+    expect(container.querySelector('[role=alert]')?.textContent).toBe(message);expect(remote.rpc).not.toHaveBeenCalled();
+    expect(await database.rosterDb.masterPeople.count()).toBe(0);
+  });
+
+  it('非掃描入口允許輸入身分證，格式錯誤不送出，校正後可送出',async()=>{
+    await render();await click(button('工號'));await click(button('新增受檢者'));await fillNew();
+    expect(field('新增身分證').readOnly).toBe(false);await input(field('新增身分證'),'A123');
+    expect(button('新增並報到').disabled).toBe(true);await submit(manual()!);
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('請確認完整且格式正確的身分證。');
+    expect(remote.rpc).not.toHaveBeenCalled();await input(field('新增身分證'),'a123456789');expect(button('新增並報到').disabled).toBe(false);
+  });
+
+  it('既有大名單找到的人員仍保留原方案、性別與分機，不套用新建一般',async()=>{
+    const source=master({item:'腹部超音波',gender:'女',extension:'8765'});await database.replaceCompanyMaster('ITRI',[source]);
+    remote.rpc.mockResolvedValue({data:row({gender:'女',planned_items:['腹部超音波'],note:'院內分機：8765'}),error:null});
+    await render();await scan();await until(()=>detail('姓名')==='王小明');expect(detail('項目')).toBe('腹部超音波');
+    await click(button('確認報到'));expect(remote.rpc).toHaveBeenCalledWith('simple_check_in_participant',expect.objectContaining({p_gender:'女',p_item:'腹部超音波',p_extension:'8765'}));
+    expect((await database.getCompanyMaster('ITRI'))[0]).toMatchObject(source);
   });
 });
