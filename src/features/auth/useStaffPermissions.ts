@@ -41,8 +41,8 @@ export function useStaffPermissions(authUserId:string|null):StaffPermissionState
       if(!active||activeUser.current!==authUserId)return;
       const generation=request.current;
       if(!authUserId){setSnapshot({userId:null,permissions:null,loading:false,error:''});return;}
-      // Cached grants never authorize a refresh, including a dirty trailing read.
-      suspend();
+      // Routine verification keeps the current DB-confirmed access while pending.
+      // Permission changes and sync failures invalidate it at their event boundary.
       try{
         const permissions=await getStaffPermissions(authUserId);
         if(!active||activeUser.current!==authUserId||generation!==request.current)return;
@@ -54,7 +54,7 @@ export function useStaffPermissions(authUserId:string|null):StaffPermissionState
       }
     });
     refresher.current={userId:authUserId,controller};
-    const reload=()=>{if(active){suspend();void controller.schedule(syncUnavailable.current);}};
+    const reload=()=>{if(active)void controller.schedule(syncUnavailable.current);};
     const changed=()=>{
       if(!active)return;
       // Realtime invalidates an in-flight result immediately. Its trailing read must
