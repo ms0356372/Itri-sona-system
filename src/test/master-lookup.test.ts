@@ -102,11 +102,11 @@ describe('Company Master v7 index upgrade',()=>{
     await legacy.table('masterPeople').add(old);await legacy.table('preparedPeople').add(prepared);await legacy.table('companySettings').put(lock);legacy.close();
     const upgraded=new RosterDatabase(name);
     try{
-      await upgraded.open();expect(upgraded.verno).toBe(7);
+      await upgraded.open();expect(upgraded.verno).toBe(8);
       expect(await upgraded.masterPeople.where('[companyKey+nationalId]').equals(['ITRI','A123456789']).toArray()).toEqual([{...old,nationalId:'A123456789'}]);
       expect(await upgraded.preparedPeople.get(prepared.localId)).toEqual(prepared);
       expect(await upgraded.companySettings.get('ITRI')).toEqual(lock);
-      expect(upgraded.tables.map(table=>table.name).sort()).toEqual(['companySettings','masterPeople','preparedPeople']);
+      expect(upgraded.tables.map(table=>table.name).sort()).toEqual(['companySettings','masterPeople','preparedPeople','preparedUploads']);
       upgraded.close();await upgraded.open();expect(await upgraded.masterPeople.get(91)).toEqual({...old,nationalId:'A123456789'});
     }finally{upgraded.close();await Dexie.delete(name);}
   });
