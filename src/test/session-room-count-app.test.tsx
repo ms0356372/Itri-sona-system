@@ -23,6 +23,11 @@ vi.mock('../features/auth/permissions',async importOriginal=>({
   ...await importOriginal<typeof import('../features/auth/permissions')>(),
   getStaffPermissions:async()=>remote.permissions,
 }));
+// Keep real timers for Realtime/coalesced refreshes; only the business date is fixed.
+vi.mock('../lib/time',async importOriginal=>({
+  ...await importOriginal<typeof import('../lib/time')>(),
+  taiwanToday:vi.fn(),
+}));
 vi.mock('../features/sessions/service',()=>({listSessions:remote.listSessions,createSession:remote.createSession,updateSessionRoomCount:remote.updateSessionRoomCount}));
 vi.mock('../features/schedule/service',()=>({listParticipants:remote.listParticipants}));
 vi.mock('../features/sync/realtime',()=>({subscribeParticipants:remote.subscribeParticipants,subscribeSessions:remote.subscribeSessions}));
@@ -38,9 +43,11 @@ vi.mock('../features/examination/service',()=>({listExaminations:vi.fn()}));
 vi.mock('../features/export/sessionExport',()=>({downloadCheckinReport:vi.fn(),downloadUltrasoundReport:vi.fn()}));
 
 import App from '../App';
+import {taiwanToday} from '../lib/time';
 
+const TEST_TODAY='2026-10-07';
 const actEnvironment=globalThis as typeof globalThis&{IS_REACT_ACT_ENVIRONMENT:boolean};
-const session=(patch:Partial<Session>={}):Session=>({id:'session-a',companyName:'ITRI',sessionDate:'2026-10-07',status:'active',roomCount:3,...patch});
+const session=(patch:Partial<Session>={}):Session=>({id:'session-a',companyName:'ITRI',sessionDate:TEST_TODAY,status:'active',roomCount:3,...patch});
 const participant=(sessionId:string):Participant=>({id:`person-${sessionId}`,sessionId,sequence:1,employeeNo:'001',name:`${sessionId} 受檢者`,gender:'男',slot:'08:00',groupCode:'A',plannedItems:['腹部超音波'],checkinNo:null,status:'未報到',checkedInAt:null,calledAt:null,note:'',updatedAt:'2026-10-07T00:00:00Z'});
 let apps:{root:Root;container:HTMLDivElement}[];
 
@@ -77,6 +84,7 @@ function currentCount(container:HTMLElement){return container.querySelector('[da
 
 describe('App 場次診間數量建立及跨裝置同步',()=>{
   beforeEach(()=>{
+    vi.mocked(taiwanToday).mockReset().mockReturnValue(TEST_TODAY);
     actEnvironment.IS_REACT_ACT_ENVIRONMENT=true;apps=[];localStorage.clear();remote.listeners.clear();
     for(const value of Object.values(remote))if(typeof value==='function'&&'mockReset' in value)value.mockReset();
     remote.sessions=[session()];
@@ -101,6 +109,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     await act(async()=>{for(const app of apps)app.root.unmount();});
     for(const app of apps)app.container.remove();
     localStorage.clear();actEnvironment.IS_REACT_ACT_ENVIRONMENT=false;
+    vi.mocked(taiwanToday).mockReset();
   });
 
   it.each([4,2,8])('新增場次設定 %i 間，透過既有建立流程儲存且選擇新場次',async roomCount=>{
@@ -146,14 +155,32 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
   });
 
   it('儲存編輯後重新載入場次，報到站取得已儲存數量',async()=>{
+    remote.sessions=[session({sessionDate:taiwanToday()})];
+    expect(remote.sessions[0].sessionDate).toBe(TEST_TODAY);
+    expect(remote.sessions[0].roomCount).toBe(3);
     const container=await mount();await manage(container);
     const editor=container.querySelector<HTMLFormElement>('form')!;
+    expect(button(container,'儲存診間數量').disabled).toBe(false);
     await input(editor.querySelector<HTMLInputElement>('input[type="number"]')!,'6');
     await act(async()=>{editor.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
     expect(remote.updateSessionRoomCount).toHaveBeenCalledExactlyOnceWith('session-a',6);
     expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：6間');
     expect(container.textContent).toContain('超音波診間數量已更新為 6 間。');
     await click(container,'返回報到站');expect(currentCount(container)).toBe('6');
+  });
+
+  it('歷史日期的 active 場次診間數量唯讀，禁止儲存或直接提交',async()=>{
+    remote.sessions=[session({sessionDate:'2026-10-06',roomCount:6})];
+    expect(taiwanToday()).toBe(TEST_TODAY);
+    const container=await mount();await manage(container);
+    const editor=container.querySelector<HTMLFormElement>('form')!;
+    const count=editor.querySelector<HTMLInputElement>('input[type="number"]')!;
+    expect(count.value).toBe('6');expect(count.disabled).toBe(true);
+    expect(button(container,'儲存診間數量').disabled).toBe(true);
+    await click(container,'儲存診間數量');
+    await act(async()=>{editor.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
+    expect(remote.updateSessionRoomCount).not.toHaveBeenCalled();
+    expect(remote.sessions[0].roomCount).toBe(6);
   });
 
   it('場次 Realtime 事件重新載入目前場次，兩個 App 同步讀取同一雲端數量',async()=>{
