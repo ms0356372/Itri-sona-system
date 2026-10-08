@@ -226,7 +226,7 @@ describe('App 權限背景確認不中斷真實名單匯入',()=>{
     expectSameRoster(input);
     expect(replace).toHaveBeenCalledOnce();
     expect(await database.getPreparedSchedule('import-session')).toMatchObject([{employeeNo:'00125',name:'受檢者 00125',slot:'08:00',item:'一般',issues:[]}]);
-    expect(button('預覽完成，下載 Excel').disabled).toBe(false);
+    expect(button('匯出整理後 Excel').disabled).toBe(false);
     await act(async()=>{permissionRead.resolve(staff());});
     expectSameRoster(input);
   });
