@@ -231,25 +231,26 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     expect(activePage(container)).toBeNull();
   });
 
-  it('重新確認權限期間收回現有畫面及資料訂閱，失敗後不復用舊授權',async()=>{
+  it('focus背景確認期間保留畫面及資料訂閱，查詢失敗才撤權且不復用舊授權',async()=>{
     const container=await mount();expect(container.textContent).toContain('今日受檢者');
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
     await settleRefresh();
-    expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
-    expect(remote.sessionListeners.size).toBe(0);expect(remote.participantListeners.size).toBe(0);
+    expect(activePage(container)).toBe('registration');expect(container.textContent).toContain('今日受檢者');
+    expect(remote.sessionListeners.size).toBe(1);expect(remote.participantListeners.size).toBe(1);
     await act(async()=>{pending.reject(new Error('network down'));});
     expect(container.textContent).toContain('無法確認此帳號的系統權限');expect(activePage(container)).toBeNull();
+    expect(remote.sessionListeners.size).toBe(0);expect(remote.participantListeners.size).toBe(0);
   });
 
-  it('focus權限確認期間隱藏業務畫面但不取消原場次租約，恢復後仍使用同一scope',async()=>{
+  it('focus背景確認期間保留診間畫面及原場次租約，完成後仍使用同一scope',async()=>{
     const container=await mount();await click(container,'超音波診間');
     expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     const calls=remote.claims.mock.calls.length;
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
     await settleRefresh();
-    expect(activePage(container)).toBeNull();expect(container.textContent).not.toContain('今日受檢者');
+    expect(activePage(container)).toBe('room');expect(container.textContent).toContain('今日受檢者');
     expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     await act(async()=>{pending.resolve(staff());});
     expect(activePage(container)).toBe('room');
@@ -267,18 +268,18 @@ describe('App 帳號頁面權限、資料載入與同步',()=>{
     expect(remote.releaseClaim).not.toHaveBeenCalled();
   });
 
-  it('權限重讀後優先恢復目前持有租約的場次，不因另一分頁變更偏好就切房',async()=>{
+  it('背景權限確認不切換目前租約場次，也不覆寫另一分頁的偏好',async()=>{
     remote.listSessions.mockResolvedValue([session(),session({id:'session-b',companyName:'另一場次',roomCount:2})]);
     const container=await mount();await click(container,'超音波診間');
     localStorage.setItem('itri-current-session','session-b');
     const pending=deferred<StaffPermissions|null>();remote.getPermissions.mockReturnValueOnce(pending.promise);
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
     await settleRefresh();
-    expect(activePage(container)).toBeNull();expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
+    expect(activePage(container)).toBe('room');expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
     await act(async()=>{pending.resolve(staff());});
     expect(container.querySelector('[data-session-id]')?.getAttribute('data-session-id')).toBe('session-a');
     expect(remote.claims).toHaveBeenLastCalledWith('session-a',3,null);
-    expect(localStorage.getItem('itri-current-session')).toBe('session-a');
+    expect(localStorage.getItem('itri-current-session')).toBe('session-b');
   });
 
   it.each(['none','console','inactive','missing'])('確認權限撤回為%s後取消lease scope，不持續續租',async mode=>{

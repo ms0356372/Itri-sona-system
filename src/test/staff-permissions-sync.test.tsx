@@ -73,6 +73,43 @@ describe('登入者權限讀取與Realtime安全隔離',()=>{
     expect(remote.get).toHaveBeenCalledTimes(6);expect(latest.permissions?.canRoom).toBe(false);
   });
 
+  it.each(['focus','visible','online','refresh'] as const)('已授權帳號的%s背景查詢等待DB期間保留access，完成後套用新權限',async trigger=>{
+    await render();const existing=latest.permissions;
+    let resolve!:(permissions:StaffPermissions)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolve=yes;}));
+    await event(()=>{
+      if(trigger==='refresh')void latest.refresh();
+      else if(trigger==='visible')document.dispatchEvent(new Event('visibilitychange'));
+      else window.dispatchEvent(new Event(trigger));
+    });
+    expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);expect(latest.error).toBe('');
+    await advance();
+    expect(remote.get).toHaveBeenCalledTimes(2);expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);
+    await event(()=>resolve(value('worker-1',{canRoom:false})));
+    expect(latest.ready).toBe(true);expect(latest.permissions?.canRoom).toBe(false);expect(latest.loading).toBe(false);
+  });
+
+  it.each([null,value('worker-1',{isActive:false}),value('worker-1',{canRegistration:false,canConsole:false,canRoom:false})])('focus背景查詢結果為missing/disabled/none時才撤銷access %s',async permissions=>{
+    await render();const existing=latest.permissions;
+    let resolve!:(permissions:StaffPermissions|null)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions|null>(yes=>{resolve=yes;}));
+    await event(()=>window.dispatchEvent(new Event('focus')));await advance();
+    expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);
+    await event(()=>resolve(permissions));
+    expect(latest.ready).toBe(false);expect(latest.permissions).toEqual(permissions);expect(latest.loading).toBe(false);expect(latest.error).toBe('');
+  });
+
+  it('focus背景查詢失敗時撤銷access並顯示友善錯誤',async()=>{
+    await render();const existing=latest.permissions;
+    let reject!:(error:Error)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>((_yes,no)=>{reject=no;}));
+    await event(()=>window.dispatchEvent(new Event('focus')));await advance();
+    expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);
+    await event(()=>reject(new Error('permission_denied')));
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(false);
+    expect(latest.error).toContain('無法確認此帳號');expect(latest.error).not.toContain('permission_denied');
+  });
+
   it('DB讀取錯誤撤銷所有access且顯示友善訊息，成功refresh恢復',async()=>{
     await render();remote.get.mockRejectedValueOnce(new Error('permission_denied'));
     await act(async()=>{await latest.refresh();});
@@ -82,15 +119,26 @@ describe('登入者權限讀取與Realtime安全隔離',()=>{
 
   it.each(['CHANNEL_ERROR','TIMED_OUT','CLOSED'])('權限同步%s立即撤權，REST讀成功不假裝已同步，重連再確認',async status=>{
     await render();await event(()=>channels[0].status?.(status));
-    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.error).toContain('同步中斷');
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(false);expect(latest.error).toContain('同步中斷');
     await event(()=>window.dispatchEvent(new Event('focus')));await advance();expect(latest.ready).toBe(false);expect(latest.error).toContain('同步中斷');
-    await event(()=>channels[0].status?.('SUBSCRIBED'));await advance();expect(latest.ready).toBe(true);expect(latest.error).toBe('');
+    let resolve!:(permissions:StaffPermissions)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolve=yes;}));
+    await event(()=>channels[0].status?.('SUBSCRIBED'));
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(true);
+    await advance();expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();
+    await event(()=>resolve(value()));expect(latest.ready).toBe(true);expect(latest.error).toBe('');
   });
 
   it('offline撤權，online不能消除已知斷線，subscription恢復才重授權',async()=>{
-    await render();await event(()=>window.dispatchEvent(new Event('offline')));expect(latest.ready).toBe(false);
+    await render();await event(()=>window.dispatchEvent(new Event('offline')));
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(false);expect(latest.error).toContain('同步中斷');
     await event(()=>window.dispatchEvent(new Event('online')));await advance();expect(latest.ready).toBe(false);
-    await event(()=>channels[0].status?.('SUBSCRIBED'));await advance();expect(latest.ready).toBe(true);
+    let resolve!:(permissions:StaffPermissions)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolve=yes;}));
+    await event(()=>channels[0].status?.('SUBSCRIBED'));
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(true);
+    await advance();expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();
+    await event(()=>resolve(value()));expect(latest.ready).toBe(true);
   });
 
   it.each(['resolve','reject'] as const)('切換帳號後舊查詢延遲%s不污染新帳號',async outcome=>{
@@ -147,17 +195,21 @@ describe('登入者權限讀取與Realtime安全隔離',()=>{
     expect(latest.ready).toBe(true);expect(remote.get).toHaveBeenCalledTimes(1);
   });
 
-  it('focus與visible等短時間事件聚合一次權限查詢，聚合等待期間仍立即撤下工作access',async()=>{
-    await render();remote.get.mockResolvedValue(value('worker-1',{canRoom:false}));
+  it('focus與visible等短時間事件聚合一次背景查詢，聚合與DB等待期間保留已有access',async()=>{
+    await render();const existing=latest.permissions;
+    let resolve!:(permissions:StaffPermissions)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolve=yes;}));
     await event(()=>{
       window.dispatchEvent(new Event('focus'));
       document.dispatchEvent(new Event('visibilitychange'));
       window.dispatchEvent(new Event('online'));
       channels[0].status?.('SUBSCRIBED');
     });
-    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(remote.get).toHaveBeenCalledTimes(1);
-    await advance(99);expect(remote.get).toHaveBeenCalledTimes(1);
-    await advance(1);expect(remote.get).toHaveBeenCalledTimes(2);expect(latest.ready).toBe(true);expect(latest.permissions?.canRoom).toBe(false);
+    expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);expect(remote.get).toHaveBeenCalledTimes(1);
+    await advance(99);expect(remote.get).toHaveBeenCalledTimes(1);expect(latest.ready).toBe(true);
+    await advance(1);expect(remote.get).toHaveBeenCalledTimes(2);expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(latest.loading).toBe(false);
+    await event(()=>resolve(value('worker-1',{canRoom:false})));
+    expect(latest.ready).toBe(true);expect(latest.permissions?.canRoom).toBe(false);
   });
 
   it('同一交易多個Realtime權限事件當場failclosed，100ms後僅讀一次最新資料',async()=>{
@@ -178,6 +230,22 @@ describe('登入者權限讀取與Realtime安全隔離',()=>{
     expect(remote.get).toHaveBeenCalledTimes(2);expect(latest.ready).toBe(false);expect(latest.loading).toBe(true);expect(latest.permissions).toBeNull();
     await event(()=>resolveLatest(value('worker-1',{canRegistration:false,canConsole:false,canRoom:false})));
     expect(latest.ready).toBe(false);expect(latest.permissions?.canRoom).toBe(false);expect(remote.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('背景focus查詢pending時Realtime當場撤權，遲到舊grant不能在最新確認前復活',async()=>{
+    await render();const existing=latest.permissions;
+    let resolveOld!:(permissions:StaffPermissions)=>void;let resolveLatest!:(permissions:StaffPermissions)=>void;
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolveOld=yes;}));
+    remote.get.mockImplementationOnce(()=>new Promise<StaffPermissions>(yes=>{resolveLatest=yes;}));
+    await event(()=>window.dispatchEvent(new Event('focus')));await advance();
+    expect(latest.ready).toBe(true);expect(latest.permissions).toBe(existing);expect(remote.get).toHaveBeenCalledTimes(2);
+    await event(()=>{for(let index=0;index<3;index++)channels[0].change?.({new:{can_room:true}});});
+    expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(true);
+    await advance();expect(remote.get).toHaveBeenCalledTimes(2);
+    await event(()=>resolveOld(value()));
+    expect(remote.get).toHaveBeenCalledTimes(3);expect(latest.ready).toBe(false);expect(latest.permissions).toBeNull();expect(latest.loading).toBe(true);
+    await event(()=>resolveLatest(value('worker-1',{canRegistration:false,canConsole:false,canRoom:false})));
+    expect(latest.ready).toBe(false);expect(latest.permissions?.canRoom).toBe(false);expect(latest.loading).toBe(false);
   });
 
   it('Realtime聚合尚未送出即切換帳號或卸載，舊timer不發query也不污染新帳號',async()=>{

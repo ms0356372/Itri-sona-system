@@ -261,7 +261,7 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     expect(remote.listSessions).toHaveBeenCalledTimes(2);
   });
 
-  it('focus 重新讀取場次設定，歷史場次保留原數量且維持唯讀',async()=>{
+  it('focus背景確認保留管理畫面，場次Realtime更新歷史數量且維持唯讀',async()=>{
     remote.sessions=[session({id:'historical-session',status:'closed',roomCount:2})];
     const container=await mount();await manage(container);
     expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：2間');
@@ -273,8 +273,13 @@ describe('App 場次診間數量建立及跨裝置同步',()=>{
     remote.sessions[0].roomCount=3;
     await act(async()=>{window.dispatchEvent(new Event('focus'));});
     await settleRefresh();
-    expect(currentCount(container)).toBe('3');await manage(container);
+    expect(editor.isConnected).toBe(true);
+    expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：2間');
+    expect(button(container,'儲存診間數量').disabled).toBe(true);
+    await broadcast();
     expect(selection(container).selectedOptions[0].textContent).toContain('超音波診間：3間');
+    expect(editor.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe('3');
     expect(container.querySelector<HTMLFormElement>('form')?.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true);
+    await click(container,'返回報到站');expect(currentCount(container)).toBe('3');
   });
 });
