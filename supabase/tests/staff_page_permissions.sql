@@ -266,7 +266,7 @@ select pg_temp.assert_permission(not exists(
       'complete_examination','enqueue_additional_examination','update_session_room_count','clear_session_schedule',
       'delete_health_session','close_health_session','acknowledge_device_clear',
       'claim_room','switch_room_claim','heartbeat_room_claim','release_room_claim','list_room_claims',
-      'simple_check_in_participant')
+      'simple_check_in_participant','get_public_board_settings','set_public_board_enabled','get_public_waiting_board')
 ),'all authenticated-callable SECURITY DEFINER functions covered by permission inventory');
 select pg_temp.assert_permission((select count(*)=4 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
   where n.nspname='public' and p.proname in ('is_active_staff','can_use_registration','can_use_console','can_use_room')
@@ -275,7 +275,8 @@ select pg_temp.assert_permission((select count(*)=4 from pg_proc p join pg_names
 select pg_temp.assert_permission(not exists(
   select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
   where n.nspname='public' and p.prosecdef and has_function_privilege('anon',p.oid,'EXECUTE')
-),'anon cannot call any public SECURITY DEFINER function');
+    and p.oid<>'public.get_public_waiting_board(text)'::regprocedure
+),'anon cannot call operational SECURITY DEFINER functions; only the minimal token-gated board read is public');
 set local role anon;
 select pg_temp.expect_permission_denied('select * from public.staff_permissions');
 select pg_temp.expect_permission_denied($sql$select public.check_in_participant('f2000000-0000-0000-0000-000000000001')$sql$);

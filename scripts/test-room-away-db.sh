@@ -142,7 +142,59 @@ from pg_proc p join pg_namespace n on n.oid=p.pronamespace
 where n.nspname='public' and p.prokind='f';
 SQL
   fi
+  if [[ "$migration" == *202610150001_public_waiting_board.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+create table auth.public_board_business_snapshot as
+select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+union all select 'participants',to_jsonb(p) from public.participants p
+union all select 'examinations',to_jsonb(e) from public.examinations e
+union all select 'rooms',to_jsonb(r) from public.rooms r
+union all select 'group_counters',to_jsonb(c) from public.group_counters c
+union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+union all select 'permissions',to_jsonb(p) from public.staff_permissions p;
+create table auth.public_board_function_snapshot as
+select p.oid,p.proacl,p.proowner,pg_get_functiondef(p.oid) definition
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and p.prokind='f';
+SQL
+  fi
   psql_local < "$migration" > /dev/null
+  if [[ "$migration" == *202610150001_public_waiting_board.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+do $$ declare old_function record; current_function record; expected_definition text; begin
+  if exists (
+    with current_rows as (
+      select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+      union all select 'participants',to_jsonb(p) from public.participants p
+      union all select 'examinations',to_jsonb(e) from public.examinations e
+      union all select 'rooms',to_jsonb(r) from public.rooms r
+      union all select 'group_counters',to_jsonb(c) from public.group_counters c
+      union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+      union all select 'permissions',to_jsonb(p) from public.staff_permissions p
+    ), changes as (
+      (select * from auth.public_board_business_snapshot except all select * from current_rows)
+      union all (select * from current_rows except all select * from auth.public_board_business_snapshot)
+    ) select 1 from changes
+  ) then raise exception 'public board migration changed existing business data or staff permissions'; end if;
+  for old_function in select * from auth.public_board_function_snapshot loop
+    select p.proacl,p.proowner,pg_get_functiondef(p.oid) definition
+      into current_function from pg_proc p where p.oid=old_function.oid;
+    expected_definition:=old_function.definition;
+    if old_function.oid='public.clear_session_schedule(uuid)'::regprocedure then
+      expected_definition:=replace(expected_definition,
+        '  delete from public.participants where session_id = p_session_id;',
+        E'  update public.session_public_boards set public_board_enabled=false where session_id=p_session_id;\n  delete from public.participants where session_id = p_session_id;');
+    end if;
+    if not found or current_function.proacl is distinct from old_function.proacl
+      or current_function.proowner is distinct from old_function.proowner
+      or current_function.definition is distinct from expected_definition then
+      raise exception 'public board migration changed existing RPC beyond clear invalidation: %',old_function.oid::regprocedure;
+    end if;
+  end loop;
+end $$;
+SQL
+    echo 'PASS: public board migration preserves every existing RPC/ACL/owner and business row, except the intended clear invalidation'
+  fi
   if [[ "$migration" == *202610070006_manual_optional_gender.sql ]]; then
     psql_local >/dev/null <<'SQL'
 do $$ declare old_function record; current_function record; expected_definition text; begin
@@ -305,7 +357,7 @@ SQL
     echo 'PASS: repeated permission migration preserves post-deploy account settings'
   fi
 done
-for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql supabase/tests/manual_optional_gender.sql; do
+for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql supabase/tests/manual_optional_gender.sql supabase/tests/public_waiting_board.sql; do
   if ! psql_local < "$room_test_sql" > "$room_test_work/$(basename "$room_test_sql").log" 2>&1; then
     cat "$room_test_work/$(basename "$room_test_sql").log" >&2
     exit 1
