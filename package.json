@@ -17,6 +17,7 @@
     "dexie": "^4.2.0",
     "dexie-react-hooks": "^1.1.7",
     "lucide-react": "^0.468.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "xlsx": "^0.18.5"

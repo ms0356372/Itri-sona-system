@@ -413,3 +413,19 @@ bash scripts/test-room-device-claim-db.sh
 ## Realtime 效能驗證
 
 訂閱範圍、100ms 查詢合併、Excel lazy load，以及可重現的查詢次數／bundle 前後比較，見 [效能紀錄](docs/realtime-performance.md)。此調整沒有新增 migration；既有租約、權限與操作規則維持。
+
+## 公開受檢等候看板
+
+具有報到站權限的工作人員可在「健檢報到站 → 場次管理 → 管理場次 → 受檢進度看板」啟用或停用看板，啟用後使用「開啟看板」取得大螢幕與手機共用的 responsive 頁面。原有三個工作站導覽維持不變。網址採 `/Itri-sona-system/#/board/<token>`，重新整理仍請求 GitHub Pages 的既有 index 路徑，不需要額外 rewrite 或 404 頁。QR Code 由本機 `qrcode.react` 產生，內容為當前完整看板 URL，不會將 token 傳給外部 QR 服務。
+
+公開頁不需登入，且不載入內部工作站 App、Auth session、IndexedDB 或 Realtime 訂閱。匿名查詢使用獨立、不保存 session 的 SDK client，即使瀏覽器已登入工作人員帳號，也不會採用其 JWT。畫面只有公司、日期、完整工號、遮罩姓名、QR 說明及台灣時間的最後更新時間；不提供現場操作或其他受檢資料。
+
+伺服器只查詢 `status = '等候中'`；已叫號、檢查中、已完成、未報到、上廁所、心電圖與先做其他全部排除，回到等候中後可在下一次更新出現。排序在資料庫內完成：標準模式使用 A～G 前綴及數字的自然順序，簡易模式使用原 queue number 規則；號碼、UUID 與狀態不出現在公開 payload。共用 SQL helper `mask_public_board_name` 在資料離開資料庫前遮罩：王小明 → 王○明、王明 → 王○、歐陽小明 → 歐○○明；單字姓名顯示 ○，空值為空字串，原始姓名不變。RPC 只回傳 `{companyName, sessionDate, people: [{employeeNo, maskedName}]}`。
+
+進入可見頁面立即讀取，之後每 10 秒更新（每個持續可見頁面約每分鐘六次查詢）。頁面 hidden 時停止 timer 並取消讀取，恢復 visible 時立即讀取並重新計時；不開重疊請求，單次網路等待上限 8 秒，之後仍由十秒輪詢重試。只有成功讀取才更新時間；失敗使用固定友善訊息並隱藏過期名單，停用／失效則清除原公司及人員資料。
+
+Migration `supabase/migrations/202610150001_public_waiting_board.sql` 新增專用私有設定表 `session_public_boards`（`session_id`、唯一 `public_board_token`、`public_board_enabled`）。它不是另一份場次表，不影響既有場次 query 或 Realtime payload。所有場次預設未啟用，首次啟用才產生兩次獨立 UUIDv4 組成的 64 位十六進位 token；停用後重新啟用會更換 token，舊 QR 不會恢復。設定表啟用 RLS，anon／authenticated 都不能直接讀寫；`get_public_board_settings` 與 `set_public_board_enabled` 要求現有報到站權限。匿名僅能呼叫 `get_public_waiting_board`，驗證 token、啟用狀態與 active 場次後才輸出最小資料，沒有開放 `participants` SELECT。
+
+停用、清除排程、刪除場次或進入 closing／closed 都會停止原公開連結；清除 RPC 僅增加停用看板的一行，原有權限、鎖定順序及兩種模式清除邏輯保留。沿用既有 GitHub → Supabase migration 部署流程，先確認新增 migration 成功，再發布前端；不需另外手動授權 anon、調整工作人員權限或在 SQL Editor 貼 SQL。部署後各場次由報到站人員自行啟用。
+
+前端驗證使用 `npm run typecheck`、`npm run lint`、`npm test`、`npm run build`、`git diff --check`。`bash scripts/test-room-away-db.sh` 在無網路、無公開連接埠的 PostgreSQL 17 暫存容器驗證所有 migration、匿名最小輸出／操作拒絕、姓名遮罩、排序、token 生命週期，以及既有權限、房態、設備租約、簡易取號與並行回歸；不連接正式 Supabase。
