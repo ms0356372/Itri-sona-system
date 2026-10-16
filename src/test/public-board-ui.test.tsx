@@ -101,7 +101,7 @@ describe('公開唯讀超音波等候看板',()=>{
     await mount();
     read.mockResolvedValueOnce({...data,people:[data.people[2],data.people[0]]});
     await advance(10_000);
-    expect(Array.from(container.querySelectorAll('li')).map(element=>element.textContent)).toEqual(['125103歐○○明','00123456王○明']);
+    expect(Array.from(container.querySelectorAll('li')).map(element=>element.textContent)).toEqual(['1125103歐○○明可進入超音波等候區','200123456王○明可進入超音波等候區']);
     expect(container.textContent).not.toContain('林○華');
   });
 
@@ -203,7 +203,7 @@ describe('公開唯讀超音波等候看板',()=>{
     read.mockResolvedValueOnce({...data,people:[]});
     await mount();
     expect(container.querySelector('[role="status"]')?.textContent).toBe('目前無受檢者等候超音波檢查');
-    expect(container.querySelector('table,ul')).toBeNull();
+    expect(container.querySelector('table,ul,ol')).toBeNull();
     expect(container.textContent).toContain('ITRI｜2026/10/15');
   });
 

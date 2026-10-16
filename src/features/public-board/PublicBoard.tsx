@@ -4,6 +4,7 @@ import {BoardQrCode} from './BoardQrCode';
 import {fetchPublicBoard,type PublicBoardData} from './service';
 
 const REFRESH_INTERVAL_MS=10_000;
+const WAITING_AREA_LIMIT=3;
 type BoardView={token:string;status:'loading'|'ready'|'closed'|'error';data:PublicBoardData|null;lastUpdatedAt:string|null};
 const initialView=(token:string):BoardView=>({token,status:'loading',data:null,lastUpdatedAt:null});
 
@@ -81,12 +82,23 @@ export function PublicBoard({token}:{token:string}){
         {view.status==='loading'&&<p role="status" className="rounded-2xl bg-white px-6 py-10 text-center text-xl font-semibold text-slate-600">正在載入目前等候進度…</p>}
         {view.status==='closed'&&<p role="status" className="rounded-2xl bg-white px-6 py-10 text-center text-xl font-semibold text-slate-600">此場次目前未開放等候進度查詢。</p>}
         {view.status==='error'&&<p role="status" className="rounded-2xl bg-amber-50 px-6 py-10 text-center text-xl font-semibold text-amber-900">目前無法取得等候進度，系統將自動重試。</p>}
-        {view.status==='ready'&&(view.data?.people.length?<ul aria-label="等候受檢者" className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-          {view.data.people.map((person,index)=><li key={`${person.employeeNo}-${index}`} className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-4 gap-y-1 rounded-2xl border border-slate-200 bg-white px-5 py-6 shadow-sm sm:px-6">
-            <span className="min-w-0 break-all text-2xl font-bold tabular-nums tracking-wide text-slate-700 lg:text-3xl">{person.employeeNo}</span>
-            <span className="min-w-0 break-all text-3xl font-black tracking-wider text-teal-900 lg:text-4xl">{person.maskedName}</span>
-          </li>)}
-        </ul>:<p role="status" className="rounded-2xl bg-white px-6 py-10 text-center text-xl font-semibold text-slate-600">目前無受檢者等候超音波檢查</p>)}
+        {view.status==='ready'&&(view.data?.people.length?<ol aria-label="等候受檢者" className="grid min-w-0 list-none grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {view.data.people.map((person,index)=>{
+            // The public RPC has already applied standard/simple queue ordering.
+            const rank=index+1;
+            const canEnter=rank<=WAITING_AREA_LIMIT;
+            return <li key={`${person.employeeNo}-${index}`} className={`min-w-0 rounded-2xl border px-5 py-6 shadow-sm sm:px-6 ${canEnter?'border-emerald-200 bg-emerald-50':'border-slate-200 bg-white'}`}>
+              <div className="flex min-w-0 items-start gap-3">
+                <span aria-label={`看板順位 ${rank}`} className={`grid min-h-11 min-w-11 shrink-0 place-items-center rounded-xl px-2 text-2xl font-black tabular-nums ${canEnter?'bg-emerald-100 text-emerald-900':'bg-slate-100 text-slate-700'}`}>{rank}</span>
+                <div className="flex min-w-0 flex-1 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                  <span className="min-w-0 break-all text-2xl font-bold tabular-nums tracking-wide text-slate-700 lg:text-3xl">{person.employeeNo}</span>
+                  <span className="min-w-0 break-all text-3xl font-black tracking-wider text-teal-900 lg:text-4xl">{person.maskedName}</span>
+                </div>
+              </div>
+              {canEnter&&<span className="mt-3 inline-block max-w-full rounded-full bg-emerald-100 px-3 py-1.5 text-sm font-bold leading-relaxed text-emerald-900 sm:text-base">可進入超音波等候區</span>}
+            </li>;
+          })}
+        </ol>:<p role="status" className="rounded-2xl bg-white px-6 py-10 text-center text-xl font-semibold text-slate-600">目前無受檢者等候超音波檢查</p>)}
       </section>
 
       {view.lastUpdatedAt&&<p className="text-right text-sm tabular-nums text-slate-500 sm:text-base">最後更新：<time dateTime={view.lastUpdatedAt}>{formatTaiwanClock(view.lastUpdatedAt)}</time></p>}
