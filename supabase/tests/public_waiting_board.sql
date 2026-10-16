@@ -95,10 +95,10 @@ reset role;
 -- is populated to catch accidental row serialization into the public payload.
 insert into public.participants(session_id,sequence_no,employee_no,full_name,gender,schedule_slot,group_code,planned_items,checkin_no,checked_in_at,status,note)
 values
-  ('c5100000-0000-0000-0000-000000000001',1,'001010','歐陽小明','男','08:00','A',array['腹部超音波'],'A10',now(),'等候中','private-extension-1234'),
-  ('c5100000-0000-0000-0000-000000000001',9,'000002','王明','女','09:00','A',array['甲狀腺超音波'],'A2',now(),'等候中','private-extension-4567'),
-  ('c5100000-0000-0000-0000-000000000001',10,'000001','王小明','男','10:00','A',array['乳房超音波'],'A1',now(),'等候中','private-extension-9999'),
-  ('c5100000-0000-0000-0000-000000000001',2,'002001','林美玲','女','11:00','B',array['頸動脈超音波'],'B1',now(),'等候中','private-extension-1111'),
+  ('c5100000-0000-0000-0000-000000000001',1,'001010','歐陽小明','男','08:00','A',array['腹部超音波'],'A10','2026-10-15T07:40:00+08:00','等候中','private-extension-1234'),
+  ('c5100000-0000-0000-0000-000000000001',9,'000002','王明','女','09:00','A',array['甲狀腺超音波'],'A2','2026-10-15T07:32:00+08:00','等候中','private-extension-4567'),
+  ('c5100000-0000-0000-0000-000000000001',10,'000001','王小明','男','10:00','A',array['乳房超音波'],'A1','2026-10-15T07:31:00+08:00','等候中','private-extension-9999'),
+  ('c5100000-0000-0000-0000-000000000001',2,'002001','林美玲','女','11:00','B',array['頸動脈超音波'],'B1','2026-10-15T08:02:00+08:00','等候中','private-extension-1111'),
   ('c5100000-0000-0000-0000-000000000001',3,'unknown-queue','陳建志','男','12:00','G',array['其他超音波'],null,null,'等候中','private-extension-2222');
 insert into public.participants(session_id,sequence_no,employee_no,full_name,schedule_slot,group_code,status)
 select 'c5100000-0000-0000-0000-000000000001',20+ordinality::integer,'excluded-'||ordinality,
@@ -148,6 +148,11 @@ select pg_temp.board_denied('select * from public.rooms');
 select pg_temp.board_denied('update public.participants set full_name=''changed''');
 select pg_temp.board_denied('delete from public.participants');
 select pg_temp.board_denied($sql$select public.mask_public_board_name('王小明')$sql$);
+select pg_temp.board_denied($sql$select public.standard_base_queue('c5100000-0000-0000-0000-000000000001')$sql$);
+select pg_temp.board_denied($sql$select public.build_standard_waiting_queue('c5100000-0000-0000-0000-000000000001')$sql$);
+select pg_temp.board_denied($sql$select public.get_standard_waiting_queue('c5100000-0000-0000-0000-000000000001')$sql$);
+select pg_temp.board_denied($sql$select public.promote_waiting_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$);
+select pg_temp.board_denied($sql$select public.cancel_promoted_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$);
 select pg_temp.board_denied($sql$select public.get_public_board_settings('c5100000-0000-0000-0000-000000000001')$sql$);
 select pg_temp.board_denied($sql$select public.set_public_board_enabled('c5100000-0000-0000-0000-000000000001',true)$sql$);
 select pg_temp.board_denied($sql$select public.clear_session_schedule('c5100000-0000-0000-0000-000000000001')$sql$);

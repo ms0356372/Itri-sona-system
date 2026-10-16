@@ -55,6 +55,19 @@ export function formatAdditionalExaminationError(error:unknown):string{
   return known?.[1]??`追加檢查失敗：${detail}`;
 }
 
+export function formatPromotionError(error:unknown):string{
+  const detail=formatError(error);
+  const messages:Record<string,string>={
+    participant_not_found:'找不到此受檢者，請重新整理後再試。',
+    session_not_found:'找不到此場次，請重新整理後再試。',
+    invalid_workflow_mode:'只有標準模式可以使用提早安排。',
+    session_not_active:'此場次目前無法調整候檢順序。',
+    invalid_state:'只有目前等候中的受檢者可以調整提早安排。',
+    protected_top_three:'目前候檢前三位已受保護，無法提早安排。',
+  };
+  return Object.entries(messages).find(([key])=>detail.includes(key))?.[1]??detail;
+}
+
 export function formatRoomCountError(error:unknown):string{
   const detail=formatError(error);
   const blocked=detail.match(/room_count_(in_progress|away|unfinished|claimed):\s*([^\n]+)/);

@@ -14,7 +14,7 @@ vi.mock('../lib/supabase',()=>({requireSupabase:()=>({
   channel:()=>{const channel={on:(_event:string,_filter:unknown,handler:(payload:CloudPayload)=>void)=>{realtime.handlers.push(handler);return channel;},subscribe:()=>channel};return channel;},
   removeChannel:vi.fn(),rpc:realtime.rpc,
 })}));
-vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn()}));
+vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>()),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
 vi.mock('../features/examination/service',async importOriginal=>({...await importOriginal<typeof import('../features/examination/service')>(),listExaminations:vi.fn(),enqueueAdditionalExamination:vi.fn()}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:vi.fn()}));
 
@@ -152,11 +152,15 @@ describe('控制台排序只調整現場顯示',()=>{
     await selectGroup('全部');expect(names()).toEqual(['B2','B1','A2','A1']);assertSort('queue','descending');expect(list).toHaveBeenCalledTimes(1);
   });
 
-  it.each([['standard',session],['simple',simpleSession]] as const)('%s 上層 Realtime 回傳同 ID 人員後立刻移至檢查中、完成後沉底，無新增查詢',async(mode,current)=>{
+  it.each([['standard',session],['simple',simpleSession]] as const)('%s 上層 Realtime 即時更新狀態，候檢順位確認後顯示且不重取examinations',async(mode,current)=>{
     const first=person('先報到',mode==='simple'?'1':'A1','等候中');const second=person('後報到',mode==='simple'?'8':'A8','等候中');
     await render([first,second],current);expect(names()).toEqual(['先報到','後報到']);const subscriptions=realtime.handlers.length;
-    await render([first,{...second,status:'檢查中'}],current);expect(names()).toEqual(['後報到','先報到']);
-    await render([first,{...second,status:'已完成'}],current);expect(names()).toEqual(['先報到','後報到']);
+    await render([first,{...second,status:'檢查中'}],current);
+    if(mode==='standard'){expect(names()).toEqual(['後報到']);await act(async()=>{await new Promise(resolve=>setTimeout(resolve,125));});}
+    expect(names()).toEqual(['後報到','先報到']);
+    await render([first,{...second,status:'已完成'}],current);
+    if(mode==='standard'){expect(names()).toEqual(['後報到']);await act(async()=>{await new Promise(resolve=>setTimeout(resolve,125));});}
+    expect(names()).toEqual(['先報到','後報到']);
     expect(list).toHaveBeenCalledTimes(1);expect(realtime.handlers).toHaveLength(subscriptions);expect(errors).not.toHaveBeenCalled();
   });
 

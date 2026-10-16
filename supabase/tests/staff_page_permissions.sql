@@ -98,6 +98,9 @@ create temporary table permission_rpc_cases(page,statement) as values
   ('registration',$sql$select public.acknowledge_device_clear('ffffffff-ffff-ffff-ffff-ffffffffffff','fake-user-id')$sql$),
   ('console',$sql$select public.set_waiting_status('ffffffff-ffff-ffff-ffff-ffffffffffff','等候中')$sql$),
   ('console',$sql$select public.call_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
+  ('console',$sql$select public.promote_waiting_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
+  ('console',$sql$select public.cancel_promoted_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
+  ('console',$sql$select public.get_standard_waiting_queue('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
   ('room',$sql$select public.start_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
   ('room',$sql$select public.complete_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
   ('room',$sql$select public.enqueue_additional_examination('ffffffff-ffff-ffff-ffff-ffffffffffff',array['腹部超音波'])$sql$),
@@ -150,6 +153,10 @@ begin
     perform pg_temp.expect_permission_denied(format('insert into public.staff_permissions(user_id,can_registration) values(%L,true)',staff.user_id));
     perform pg_temp.expect_permission_denied($sql$update public.participants set status='已完成' where id='f2000000-0000-0000-0000-000000000001'$sql$);
     perform pg_temp.expect_permission_denied($sql$update public.participants set checkin_no='A999',checked_in_at=now(),called_at=now() where id='f2000000-0000-0000-0000-000000000001'$sql$);
+    perform pg_temp.expect_permission_denied($sql$update public.participants set promoted_at=now(),promoted_after_key='[]'::jsonb where id='f2000000-0000-0000-0000-000000000001'$sql$);
+    perform pg_temp.expect_permission_denied($sql$insert into public.participants(session_id,sequence_no,employee_no,full_name,schedule_slot,group_code,promoted_at) values('f1000000-0000-0000-0000-000000000001',99,'forged-promotion','Forged','08:00','A',now())$sql$);
+    perform pg_temp.expect_permission_denied($sql$select public.standard_base_queue('f1000000-0000-0000-0000-000000000001')$sql$);
+    perform pg_temp.expect_permission_denied($sql$select public.build_standard_waiting_queue('f1000000-0000-0000-0000-000000000001')$sql$);
     perform pg_temp.expect_permission_denied($sql$update public.health_sessions set room_count=8 where id='f1000000-0000-0000-0000-000000000001'$sql$);
     perform pg_temp.expect_permission_denied($sql$update public.health_sessions set status='closed' where id='f1000000-0000-0000-0000-000000000001'$sql$);
     perform pg_temp.expect_permission_denied($sql$update public.rooms set status='away' where session_id='f1000000-0000-0000-0000-000000000001'$sql$);
@@ -266,6 +273,7 @@ select pg_temp.assert_permission(not exists(
       'complete_examination','enqueue_additional_examination','update_session_room_count','clear_session_schedule',
       'delete_health_session','close_health_session','acknowledge_device_clear',
       'claim_room','switch_room_claim','heartbeat_room_claim','release_room_claim','list_room_claims',
+      'promote_waiting_participant','cancel_promoted_participant','get_standard_waiting_queue',
       'simple_check_in_participant','get_public_board_settings','set_public_board_enabled','get_public_waiting_board')
 ),'all authenticated-callable SECURITY DEFINER functions covered by permission inventory');
 select pg_temp.assert_permission((select count(*)=4 from pg_proc p join pg_namespace n on n.oid=p.pronamespace

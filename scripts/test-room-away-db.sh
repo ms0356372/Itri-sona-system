@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs only against a disposable local container: no Supabase credentials,
 # exposed ports, network, or production DATABASE_URL are used.
+# Uses standard grep so CI needs no separate ripgrep installation.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 room_test_container="ultrasound-room-away-test-$$"
@@ -158,7 +159,64 @@ from pg_proc p join pg_namespace n on n.oid=p.pronamespace
 where n.nspname='public' and p.prokind='f';
 SQL
   fi
+  if [[ "$migration" == *202610160001_standard_waiting_queue.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+-- Compare every pre-existing business value, including server check-in clocks
+-- and both numbering models, before accepting the additive nullable columns.
+create table auth.standard_queue_business_snapshot as
+select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+union all select 'participants',to_jsonb(p) from public.participants p
+union all select 'examinations',to_jsonb(e) from public.examinations e
+union all select 'rooms',to_jsonb(r) from public.rooms r
+union all select 'group_counters',to_jsonb(c) from public.group_counters c
+union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+union all select 'public_boards',to_jsonb(b) from public.session_public_boards b;
+create table auth.standard_queue_function_snapshot as
+select p.oid,p.proacl,p.proowner,pg_get_functiondef(p.oid) definition
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and p.prokind='f';
+SQL
+  fi
   psql_local < "$migration" > /dev/null
+  if [[ "$migration" == *202610160001_standard_waiting_queue.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+do $$ declare old_function record; current_function record; begin
+  if exists (
+    with current_rows as (
+      select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+      union all select 'participants',to_jsonb(p)-array['promoted_at','promoted_after_key'] from public.participants p
+      union all select 'examinations',to_jsonb(e) from public.examinations e
+      union all select 'rooms',to_jsonb(r) from public.rooms r
+      union all select 'group_counters',to_jsonb(c) from public.group_counters c
+      union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+      union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+      union all select 'public_boards',to_jsonb(b) from public.session_public_boards b
+    ), changes as (
+      (select * from auth.standard_queue_business_snapshot except all select * from current_rows)
+      union all (select * from current_rows except all select * from auth.standard_queue_business_snapshot)
+    ) select 1 from changes
+  ) then raise exception 'standard queue migration rewrote existing business data, timestamps or counters'; end if;
+  if exists(select 1 from public.participants where promoted_at is not null or promoted_after_key is not null) then
+    raise exception 'standard queue migration invented promotions for legacy rows';
+  end if;
+  for old_function in select * from auth.standard_queue_function_snapshot loop
+    select p.proacl,p.proowner,pg_get_functiondef(p.oid) definition into current_function from pg_proc p where p.oid=old_function.oid;
+    if not found or current_function.proacl is distinct from old_function.proacl
+      or current_function.proowner is distinct from old_function.proowner
+      or (old_function.oid<>'public.get_public_waiting_board(text)'::regprocedure
+        and current_function.definition is distinct from old_function.definition) then
+      raise exception 'standard queue migration changed an existing RPC/ACL beyond canonical public ordering: %',old_function.oid::regprocedure;
+    end if;
+  end loop;
+end $$;
+-- The legacy permission test compares whole rows; amend only the additive
+-- NULLs after independently proving all original columns and values above.
+update auth.permission_history_snapshot set record=record||'{"promoted_at":null,"promoted_after_key":null}'::jsonb
+where kind='participants';
+SQL
+    echo 'PASS: standard queue migration preserves existing rows, server times, tickets, counters, RPC ownership and ACL; new promotion data defaults NULL'
+  fi
   if [[ "$migration" == *202610150001_public_waiting_board.sql ]]; then
     psql_local >/dev/null <<'SQL'
 do $$ declare old_function record; current_function record; expected_definition text; begin
@@ -357,12 +415,12 @@ SQL
     echo 'PASS: repeated permission migration preserves post-deploy account settings'
   fi
 done
-for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql supabase/tests/manual_optional_gender.sql supabase/tests/public_waiting_board.sql; do
+for room_test_sql in supabase/tests/room_device_claim.sql supabase/tests/staff_page_permissions.sql supabase/tests/room_away.sql supabase/tests/session_room_count.sql supabase/tests/simple_workflow.sql supabase/tests/manual_optional_gender.sql supabase/tests/public_waiting_board.sql supabase/tests/standard_waiting_queue.sql; do
   if ! psql_local < "$room_test_sql" > "$room_test_work/$(basename "$room_test_sql").log" 2>&1; then
     cat "$room_test_work/$(basename "$room_test_sql").log" >&2
     exit 1
   fi
-  rg '^PASS:' "$room_test_work/$(basename "$room_test_sql").log"
+  grep '^PASS:' "$room_test_work/$(basename "$room_test_sql").log"
 done
 
 # Exercise true database contention using independent psql connections. The
@@ -394,10 +452,10 @@ SQL
 psql_local < "$room_test_work/away-first.sql" > "$room_test_work/away-first.log" 2>&1 &
 room_away_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'ROOM_LOCK_HELD' "$room_test_work/away-first.log"; then break; fi
+  if grep -q 'ROOM_LOCK_HELD' "$room_test_work/away-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'ROOM_LOCK_HELD' "$room_test_work/away-first.log"
+grep -q 'ROOM_LOCK_HELD' "$room_test_work/away-first.log"
 if psql_local > "$room_test_work/start-blocked.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -408,7 +466,7 @@ then
   exit 1
 fi
 wait "$room_away_pid"
-if ! rg -q 'room_away' "$room_test_work/start-blocked.log"; then
+if ! grep -q 'room_away' "$room_test_work/start-blocked.log"; then
   cat "$room_test_work/start-blocked.log" >&2
   exit 1
 fi
@@ -431,10 +489,10 @@ SQL
 psql_local < "$room_test_work/start-first.sql" > "$room_test_work/start-first.log" 2>&1 &
 room_start_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'ROOM_LOCK_HELD' "$room_test_work/start-first.log"; then break; fi
+  if grep -q 'ROOM_LOCK_HELD' "$room_test_work/start-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'ROOM_LOCK_HELD' "$room_test_work/start-first.log"
+grep -q 'ROOM_LOCK_HELD' "$room_test_work/start-first.log"
 if psql_local > "$room_test_work/occupied.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -445,7 +503,7 @@ then
   exit 1
 fi
 wait "$room_start_pid"
-if ! rg -q 'room_occupied' "$room_test_work/occupied.log"; then
+if ! grep -q 'room_occupied' "$room_test_work/occupied.log"; then
   cat "$room_test_work/occupied.log" >&2
   exit 1
 fi
@@ -471,10 +529,10 @@ SQL
 psql_local < "$room_test_work/close-first.sql" > "$room_test_work/close-first.log" 2>&1 &
 room_close_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SESSION_LOCK_HELD' "$room_test_work/close-first.log"; then break; fi
+  if grep -q 'SESSION_LOCK_HELD' "$room_test_work/close-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SESSION_LOCK_HELD' "$room_test_work/close-first.log"
+grep -q 'SESSION_LOCK_HELD' "$room_test_work/close-first.log"
 if psql_local > "$room_test_work/closed.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -486,7 +544,7 @@ then
   exit 1
 fi
 wait "$room_close_pid"
-if ! rg -q 'not_today_session' "$room_test_work/closed.log"; then
+if ! grep -q 'not_today_session' "$room_test_work/closed.log"; then
   cat "$room_test_work/closed.log" >&2
   exit 1
 fi
@@ -518,10 +576,10 @@ SQL
 psql_local < "$room_test_work/count-start-first.sql" > "$room_test_work/count-start-first.log" 2>&1 &
 room_count_start_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SESSION_SHARE_HELD' "$room_test_work/count-start-first.log"; then break; fi
+  if grep -q 'SESSION_SHARE_HELD' "$room_test_work/count-start-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SESSION_SHARE_HELD' "$room_test_work/count-start-first.log"
+grep -q 'SESSION_SHARE_HELD' "$room_test_work/count-start-first.log"
 if psql_local > "$room_test_work/count-shrink-blocked.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -530,7 +588,7 @@ select public.update_session_room_count('22222222-2222-2222-2222-222222222225',4
 SQL
 then echo 'FAIL: a shrink bypassed a concurrent examination start' >&2; exit 1; fi
 wait "$room_count_start_pid"
-if ! rg -q 'room_count_in_progress:診間 5' "$room_test_work/count-shrink-blocked.log"; then cat "$room_test_work/count-shrink-blocked.log" >&2; exit 1; fi
+if ! grep -q 'room_count_in_progress:診間 5' "$room_test_work/count-shrink-blocked.log"; then cat "$room_test_work/count-shrink-blocked.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -554,10 +612,10 @@ SQL
 psql_local < "$room_test_work/count-shrink-first.sql" > "$room_test_work/count-shrink-first.log" 2>&1 &
 room_count_shrink_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SESSION_EXCLUSIVE_HELD' "$room_test_work/count-shrink-first.log"; then break; fi
+  if grep -q 'SESSION_EXCLUSIVE_HELD' "$room_test_work/count-shrink-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SESSION_EXCLUSIVE_HELD' "$room_test_work/count-shrink-first.log"
+grep -q 'SESSION_EXCLUSIVE_HELD' "$room_test_work/count-shrink-first.log"
 if psql_local > "$room_test_work/count-start-blocked.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -566,7 +624,7 @@ select public.start_examination('33333333-3333-3333-3333-333333333335','診間5'
 SQL
 then echo 'FAIL: a start bypassed a concurrent safe decrease' >&2; exit 1; fi
 wait "$room_count_shrink_pid"
-if ! rg -q 'invalid_room' "$room_test_work/count-start-blocked.log"; then cat "$room_test_work/count-start-blocked.log" >&2; exit 1; fi
+if ! grep -q 'invalid_room' "$room_test_work/count-start-blocked.log"; then cat "$room_test_work/count-start-blocked.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -590,10 +648,10 @@ SQL
 psql_local < "$room_test_work/count-away-first.sql" > "$room_test_work/count-away-first.log" 2>&1 &
 room_count_away_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SESSION_SHARE_HELD' "$room_test_work/count-away-first.log"; then break; fi
+  if grep -q 'SESSION_SHARE_HELD' "$room_test_work/count-away-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SESSION_SHARE_HELD' "$room_test_work/count-away-first.log"
+grep -q 'SESSION_SHARE_HELD' "$room_test_work/count-away-first.log"
 if psql_local > "$room_test_work/count-away-blocked.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -602,7 +660,7 @@ select public.update_session_room_count('22222222-2222-2222-2222-222222222225',4
 SQL
 then echo 'FAIL: a shrink bypassed concurrent temporary absence' >&2; exit 1; fi
 wait "$room_count_away_pid"
-if ! rg -q 'room_count_away:診間 6' "$room_test_work/count-away-blocked.log"; then cat "$room_test_work/count-away-blocked.log" >&2; exit 1; fi
+if ! grep -q 'room_count_away:診間 6' "$room_test_work/count-away-blocked.log"; then cat "$room_test_work/count-away-blocked.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 do $$ begin
   if not exists(select 1 from public.health_sessions where id='22222222-2222-2222-2222-222222222225' and room_count=6) then raise exception 'concurrent rejected shrink modified count'; end if;
@@ -631,10 +689,10 @@ SQL
 psql_local < "$room_test_work/claim-first.sql" > "$room_test_work/claim-first.log" 2>&1 &
 claim_first_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'CLAIM_LOCK_HELD' "$room_test_work/claim-first.log"; then break; fi
+  if grep -q 'CLAIM_LOCK_HELD' "$room_test_work/claim-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'CLAIM_LOCK_HELD' "$room_test_work/claim-first.log"
+grep -q 'CLAIM_LOCK_HELD' "$room_test_work/claim-first.log"
 if psql_local > "$room_test_work/claim-second.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -643,7 +701,7 @@ select public.claim_room('22222222-2222-2222-2222-222222222227','診間1','10777
 SQL
 then echo 'FAIL: concurrent browsers both claimed one room' >&2; exit 1; fi
 wait "$claim_first_pid"
-if ! rg -q 'room_claimed' "$room_test_work/claim-second.log"; then cat "$room_test_work/claim-second.log" >&2; exit 1; fi
+if ! grep -q 'room_claimed' "$room_test_work/claim-second.log"; then cat "$room_test_work/claim-second.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 do $$ begin
   if not exists(select 1 from public.rooms where session_id='22222222-2222-2222-2222-222222222227' and room_id='診間 1'
@@ -669,10 +727,10 @@ SQL
 psql_local < "$room_test_work/takeover-first.sql" > "$room_test_work/takeover-first.log" 2>&1 &
 claim_takeover_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'CLAIM_LOCK_HELD' "$room_test_work/takeover-first.log"; then break; fi
+  if grep -q 'CLAIM_LOCK_HELD' "$room_test_work/takeover-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'CLAIM_LOCK_HELD' "$room_test_work/takeover-first.log"
+grep -q 'CLAIM_LOCK_HELD' "$room_test_work/takeover-first.log"
 if psql_local > "$room_test_work/takeover-old-start.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -681,7 +739,7 @@ select public.start_examination('33333333-3333-3333-3333-333333333337','診間1'
 SQL
 then echo 'FAIL: stale device started after concurrent takeover' >&2; exit 1; fi
 wait "$claim_takeover_pid"
-if ! rg -q 'room_claim_lost' "$room_test_work/takeover-old-start.log"; then cat "$room_test_work/takeover-old-start.log" >&2; exit 1; fi
+if ! grep -q 'room_claim_lost' "$room_test_work/takeover-old-start.log"; then cat "$room_test_work/takeover-old-start.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 do $$ begin
   if exists(select 1 from public.examinations where participant_id='33333333-3333-3333-3333-333333333337') then
@@ -712,10 +770,10 @@ SQL
 psql_local < "$room_test_work/operation-first.sql" > "$room_test_work/operation-first.log" 2>&1 &
 claim_operation_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'CLAIM_LOCK_HELD' "$room_test_work/operation-first.log"; then break; fi
+  if grep -q 'CLAIM_LOCK_HELD' "$room_test_work/operation-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'CLAIM_LOCK_HELD' "$room_test_work/operation-first.log"
+grep -q 'CLAIM_LOCK_HELD' "$room_test_work/operation-first.log"
 if ! psql_local > "$room_test_work/operation-takeover.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -730,7 +788,7 @@ set role authenticated;
 select public.complete_examination((select id from public.examinations where participant_id='33333333-3333-3333-3333-333333333337'),'診間1',array['腹部超音波'],'10777777-7777-7777-7777-777777777771',repeat('a',64));
 SQL
 then echo 'FAIL: former owner completed after takeover won the mutex' >&2; exit 1; fi
-if ! rg -q 'room_claim_lost' "$room_test_work/operation-stale-complete.log"; then cat "$room_test_work/operation-stale-complete.log" >&2; exit 1; fi
+if ! grep -q 'room_claim_lost' "$room_test_work/operation-stale-complete.log"; then cat "$room_test_work/operation-stale-complete.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -762,10 +820,10 @@ SQL
 psql_local < "$room_test_work/heartbeat-first.sql" > "$room_test_work/heartbeat-first.log" 2>&1 &
 claim_heartbeat_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'CLAIM_LOCK_HELD' "$room_test_work/heartbeat-first.log"; then break; fi
+  if grep -q 'CLAIM_LOCK_HELD' "$room_test_work/heartbeat-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'CLAIM_LOCK_HELD' "$room_test_work/heartbeat-first.log"
+grep -q 'CLAIM_LOCK_HELD' "$room_test_work/heartbeat-first.log"
 if psql_local > "$room_test_work/heartbeat-competing-claim.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -774,7 +832,7 @@ select public.claim_room('22222222-2222-2222-2222-222222222227','診間1','10777
 SQL
 then echo 'FAIL: competing claim bypassed concurrent heartbeat renewal' >&2; exit 1; fi
 wait "$claim_heartbeat_pid"
-if ! rg -q 'room_claimed' "$room_test_work/heartbeat-competing-claim.log"; then cat "$room_test_work/heartbeat-competing-claim.log" >&2; exit 1; fi
+if ! grep -q 'room_claimed' "$room_test_work/heartbeat-competing-claim.log"; then cat "$room_test_work/heartbeat-competing-claim.log" >&2; exit 1; fi
 psql_local >/dev/null <<'SQL'
 do $$ begin
   if not exists(select 1 from public.rooms where session_id='22222222-2222-2222-2222-222222222227' and room_id='診間 1'
@@ -804,10 +862,10 @@ SQL
 psql_local < "$room_test_work/simple-first.sql" > "$room_test_work/simple-first.log" 2>&1 &
 simple_first_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"; then break; fi
+  if grep -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"
+grep -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-first.log"
 if ! psql_local > "$room_test_work/simple-second.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -840,10 +898,10 @@ SQL
 psql_local < "$room_test_work/simple-duplicate-first.sql" > "$room_test_work/simple-duplicate-first.log" 2>&1 &
 simple_duplicate_pid=$!
 for attempt in {1..50}; do
-  if rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"; then break; fi
+  if grep -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"; then break; fi
   sleep 0.1
 done
-rg -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"
+grep -q 'SIMPLE_QUEUE_LOCK_HELD' "$room_test_work/simple-duplicate-first.log"
 if ! psql_local > "$room_test_work/simple-duplicate-second.log" 2>&1 <<'SQL'
 set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
 set role authenticated;
@@ -867,3 +925,189 @@ do $$ begin
 end $$;
 SQL
 echo 'PASS: simultaneous registration of the same employee returns one participant/ticket and preserves original items/extension'
+
+# Promotion RPCs share a per-session NO KEY UPDATE mutex. These independent
+# connections exercise retries, FIFO, old check-in FK locks, call and clear.
+psql_local >/dev/null <<'SQL'
+insert into public.health_sessions(id,session_date,company_name,created_by)
+select ('d8100000-0000-0000-0000-'||lpad(n::text,12,'0'))::uuid,
+  (clock_timestamp() at time zone 'Asia/Taipei')::date,'standard queue race '||n,
+  '11111111-1111-1111-1111-111111111111'
+from generate_series(1,5) n;
+insert into public.participants(id,session_id,sequence_no,employee_no,full_name,schedule_slot,
+  group_code,checkin_sequence,checkin_no,checked_in_at,status)
+select md5(s.id::text||':'||employee)::uuid,s.id,position,employee,'Queue race',
+  '07:30~08:00','A',position,'A'||position,
+  '2026-10-16T07:30:00+08:00'::timestamptz+position*interval '1 minute','等候中'
+from public.health_sessions s cross join (values
+  ('normal1',1),('normal2',2),('normal3',3),('normal4',4),('P1',5),('P2',6)
+) people(employee,position) where s.id::text like 'd8100000-%';
+insert into public.participants(id,session_id,sequence_no,employee_no,full_name,schedule_slot,group_code)
+values(md5('d8100000-0000-0000-0000-000000000003:X')::uuid,
+  'd8100000-0000-0000-0000-000000000003',7,'X','First G arrival','10:30~11:00','G');
+create table auth.standard_queue_race_snapshot(id uuid primary key,record jsonb);
+grant insert on auth.standard_queue_race_snapshot to authenticated;
+SQL
+standard_queue_race() {
+  local queue_race_name="$1"
+  psql_local < "$room_test_work/$queue_race_name-first.sql" > "$room_test_work/$queue_race_name-first.log" 2>&1 &
+  local queue_race_pid=$!
+  for attempt in {1..50}; do
+    if grep -q 'STANDARD_QUEUE_LOCK_HELD' "$room_test_work/$queue_race_name-first.log"; then break; fi
+    sleep 0.1
+  done
+  if ! grep -q 'STANDARD_QUEUE_LOCK_HELD' "$room_test_work/$queue_race_name-first.log"; then
+    cat "$room_test_work/$queue_race_name-first.log" >&2; exit 1
+  fi
+  if ! psql_local < "$room_test_work/$queue_race_name-second.sql" > "$room_test_work/$queue_race_name-second.log" 2>&1; then
+    cat "$room_test_work/$queue_race_name-second.log" >&2; exit 1
+  fi
+  if ! wait "$queue_race_pid"; then cat "$room_test_work/$queue_race_name-first.log" >&2; exit 1; fi
+}
+
+cat > "$room_test_work/promote-duplicate-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+insert into auth.standard_queue_race_snapshot
+select person.id,to_jsonb(person) from public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000001:P1')::uuid) person;
+\echo STANDARD_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+cat > "$room_test_work/promote-duplicate-second.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+select public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000001:P1')::uuid);
+SQL
+standard_queue_race promote-duplicate
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if not exists(select 1 from auth.standard_queue_race_snapshot old join public.participants p using(id)
+    where old.record=to_jsonb(p) and p.promoted_at is not null) then
+    raise exception 'concurrent duplicate promotion reset original timestamp, boundary or row';
+  end if;
+end $$;
+SQL
+echo 'PASS: concurrent duplicate promotion preserves one exact server timestamp, boundary and participant row'
+
+cat > "$room_test_work/promote-fifo-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000002:P1')::uuid);
+\echo STANDARD_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+cat > "$room_test_work/promote-fifo-second.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+select public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000002:P2')::uuid);
+SQL
+standard_queue_race promote-fifo
+psql_local >/dev/null <<'SQL'
+do $$ declare actual text[]; begin
+  select array_agg(p.employee_no order by q.queue_position) into actual
+  from public.build_standard_waiting_queue('d8100000-0000-0000-0000-000000000002') q
+  join public.participants p on p.id=q.participant_id;
+  if actual<>array['normal1','normal2','normal3','P1','P2','normal4']
+    or not (select first.promoted_at<second.promoted_at from public.participants first
+      join public.participants second on second.session_id=first.session_id
+      where first.session_id='d8100000-0000-0000-0000-000000000002'
+        and first.employee_no='P1' and second.employee_no='P2') then
+    raise exception 'serialized concurrent promotions lost server-clock FIFO or current three';
+  end if;
+end $$;
+SQL
+echo 'PASS: two tablets concurrently arranging different people retain protected three and Database Server FIFO'
+
+# Reproduce the old participant -> new group-counter -> session FK KEY SHARE
+# ordering. A promotion using session FOR UPDATE would deadlock with this path.
+cat > "$room_test_work/promote-checkin-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select id from public.participants where id=md5('d8100000-0000-0000-0000-000000000003:X')::uuid for update;
+\echo STANDARD_QUEUE_LOCK_HELD
+select pg_sleep(2);
+select public.check_in_participant(md5('d8100000-0000-0000-0000-000000000003:X')::uuid);
+commit;
+SQL
+cat > "$room_test_work/promote-checkin-second.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+select public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000003:X')::uuid);
+SQL
+standard_queue_race promote-checkin
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if not exists(select 1 from public.participants where id=md5('d8100000-0000-0000-0000-000000000003:X')::uuid
+    and checkin_no='G1' and checkin_sequence=1 and checked_in_at is not null and promoted_at is not null and status='等候中')
+    or not exists(select 1 from public.group_counters where session_id='d8100000-0000-0000-0000-000000000003'
+      and group_code='G' and last_value=1) then
+    raise exception 'promotion raced/deadlocked with first standard group counter or rewrote the check-in ticket';
+  end if;
+end $$;
+SQL
+echo 'PASS: first-group standard check-in and promotion avoid FK/session deadlock and preserve G1/server time/counter'
+
+cat > "$room_test_work/promote-call-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select public.call_participant(md5('d8100000-0000-0000-0000-000000000004:P1')::uuid);
+\echo STANDARD_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+cat > "$room_test_work/promote-call-second.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+do $$ declare rejected boolean:=false; begin
+  begin perform public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000004:P1')::uuid);
+  exception when raise_exception then if sqlerrm<>'invalid_state' then raise; end if; rejected:=true; end;
+  if not rejected then raise exception 'promotion admitted a concurrently called participant'; end if;
+end $$;
+SQL
+standard_queue_race promote-call
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if not exists(select 1 from public.participants where id=md5('d8100000-0000-0000-0000-000000000004:P1')::uuid
+    and status='已叫號' and promoted_at is null and promoted_after_key is null) then
+    raise exception 'concurrent call/promotion changed call semantics or created promotion state';
+  end if;
+end $$;
+SQL
+echo 'PASS: promotion rechecks the locked participant after a concurrent call and rejects its new non-waiting state'
+
+cat > "$room_test_work/promote-clear-first.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+begin;
+select public.promote_waiting_participant(md5('d8100000-0000-0000-0000-000000000005:P1')::uuid);
+\echo STANDARD_QUEUE_LOCK_HELD
+select pg_sleep(2);
+commit;
+SQL
+cat > "$room_test_work/promote-clear-second.sql" <<'SQL'
+set request.jwt.claim.sub='11111111-1111-1111-1111-111111111111';
+set role authenticated;
+set statement_timeout='10s';
+select public.clear_session_schedule('d8100000-0000-0000-0000-000000000005');
+SQL
+standard_queue_race promote-clear
+psql_local >/dev/null <<'SQL'
+do $$ begin
+  if exists(select 1 from public.participants where session_id='d8100000-0000-0000-0000-000000000005')
+    or exists(select 1 from public.group_counters where session_id='d8100000-0000-0000-0000-000000000005')
+    or exists(select 1 from public.build_standard_waiting_queue('d8100000-0000-0000-0000-000000000005')) then
+    raise exception 'clear racing promotion retained queue state or participants';
+  end if;
+end $$;
+SQL
+echo 'PASS: clear serializes after a concurrent promotion and leaves no participants, counters or phantom queue'
