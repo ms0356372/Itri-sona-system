@@ -11,7 +11,7 @@ import {subscribeExaminations} from '../sync/realtime';
 import {createRefreshCoalescer,type RefreshCoalescer} from '../sync/refresh';
 import {getQueueNumber,isSimpleSession} from '../workflow/mode';
 import {getAssignedRoom,sortConsoleRows,type ConsoleSortDirection,type ConsoleSortMode} from './sorting';
-import {useStandardWaitingQueue} from './useStandardWaitingQueue';
+import {useWaitingQueue} from '../workflow/useWaitingQueue';
 
 const waiting:Extract<WorkStatus,'等候中'|'上廁所'|'心電圖'|'先做其他'>[]=['等候中','上廁所','心電圖','先做其他'];
 const roomLabel=(roomId:string|null|undefined)=>{
@@ -20,7 +20,7 @@ const roomLabel=(roomId:string|null|undefined)=>{
 };
 export function UltrasoundConsole({current,participants,onChanged,onError,canRoom=false}:{current:Session|null;participants:Participant[];onChanged:()=>Promise<void>;onError:(message:string)=>void;canRoom?:boolean}){
   const simple=isSimpleSession(current);
-  const waitingQueue=useStandardWaitingQueue(current?.id??null,simple,participants);
+  const waitingQueue=useWaitingQueue(current,participants);
   const[group,setGroup]=useState<'全部'|Participant['groupCode']>('全部');const[busy,setBusy]=useState('');const[examinations,setExaminations]=useState<Examination[]>([]);const[adding,setAdding]=useState<Participant|null>(null);const[additionalItems,setAdditionalItems]=useState<UltrasoundItemName[]>([]);
   const[sortMode,setSortMode]=useState<ConsoleSortMode>('priority');
   const[sortDirection,setSortDirection]=useState<ConsoleSortDirection>('asc');

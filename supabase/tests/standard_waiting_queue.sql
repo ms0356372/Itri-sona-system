@@ -48,9 +48,11 @@ end $$;
 
 insert into auth.users(id,email) values
   ('d7000000-0000-0000-0000-000000000001','standard.queue.console@itri.example.com'),
-  ('d7000000-0000-0000-0000-000000000002','standard.queue.registration@itri.example.com');
+  ('d7000000-0000-0000-0000-000000000002','standard.queue.registration@itri.example.com'),
+  ('d7000000-0000-0000-0000-000000000003','standard.queue.room@itri.example.com');
 update public.staff_permissions set can_console=true where user_id='d7000000-0000-0000-0000-000000000001';
 update public.staff_permissions set can_registration=true where user_id='d7000000-0000-0000-0000-000000000002';
+update public.staff_permissions set can_room=true where user_id='d7000000-0000-0000-0000-000000000003';
 insert into public.health_sessions(id,session_date,company_name,created_by,workflow_mode,status) values
   ('d7100000-0000-0000-0000-000000000001',(clock_timestamp() at time zone 'Asia/Taipei')::date,'Standard queue base','d7000000-0000-0000-0000-000000000002','standard','active'),
   ('d7100000-0000-0000-0000-000000000002',(clock_timestamp() at time zone 'Asia/Taipei')::date,'Standard queue promotion','d7000000-0000-0000-0000-000000000002','standard','active'),
@@ -274,6 +276,23 @@ select pg_temp.standard_denied($sql$select public.standard_base_queue('d7100000-
 select pg_temp.standard_denied($sql$select public.build_standard_waiting_queue('d7100000-0000-0000-0000-000000000002')$sql$);
 select pg_temp.standard_denied($sql$update public.participants set promoted_at=clock_timestamp() where session_id='d7100000-0000-0000-0000-000000000002'$sql$);
 select pg_temp.standard_denied($sql$update public.participants set promoted_after_key='{}' where session_id='d7100000-0000-0000-0000-000000000002'$sql$);
+-- A room-only account reads the same snapshot, including promotion/natural
+-- advancement. Read access must never confer console mutation permission.
+set local request.jwt.claim.sub='d7000000-0000-0000-0000-000000000003';
+select pg_temp.assert_standard(public.can_use_room() and not public.can_use_console()
+  and not public.can_use_registration(),'room queue reader has no other page permission');
+select pg_temp.assert_standard((
+  select jsonb_agg(jsonb_build_object('employeeNo',p.employee_no,'maskedName','王○明') order by q.queue_position)
+  from public.get_standard_waiting_queue('d7100000-0000-0000-0000-000000000002') q join public.participants p on p.id=q.participant_id
+)=(select people from standard_expected_public),'room-only reader and console consume identical canonical queue positions');
+select pg_temp.standard_error($sql$select public.get_standard_waiting_queue('d7100000-0000-0000-0000-000000000003')$sql$,'invalid_workflow_mode');
+select pg_temp.standard_error($sql$select public.promote_waiting_participant((select id from public.participants where session_id='d7100000-0000-0000-0000-000000000002' and employee_no='D'))$sql$,'permission_denied','42501');
+select pg_temp.standard_error($sql$select public.cancel_promoted_participant((select id from public.participants where session_id='d7100000-0000-0000-0000-000000000002' and employee_no='P2'))$sql$,'permission_denied','42501');
+select pg_temp.standard_denied($sql$select public.build_standard_waiting_queue('d7100000-0000-0000-0000-000000000002')$sql$);
+set local request.jwt.claim.sub='d7000000-0000-0000-0000-000000000002';
+select pg_temp.standard_error($sql$select public.get_standard_waiting_queue('d7100000-0000-0000-0000-000000000002')$sql$,'permission_denied','42501');
+select pg_temp.standard_error($sql$select public.promote_waiting_participant((select id from public.participants where session_id='d7100000-0000-0000-0000-000000000002' and employee_no='D'))$sql$,'permission_denied','42501');
+select pg_temp.standard_error($sql$select public.cancel_promoted_participant((select id from public.participants where session_id='d7100000-0000-0000-0000-000000000002' and employee_no='P2'))$sql$,'permission_denied','42501');
 reset role;
 set local role anon;
 set local request.jwt.claim.sub='';
@@ -297,7 +316,7 @@ select pg_temp.standard_denied($sql$select public.build_standard_waiting_queue('
 select pg_temp.standard_denied($sql$select public.promote_waiting_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$);
 select pg_temp.standard_denied($sql$select public.cancel_promoted_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$);
 reset role;
-\echo 'PASS: CASE 18-21 canonical console/public parity, exact anonymous allowlist, unchanged simple order, private helper denial and no direct promotion writes'
+\echo 'PASS: CASE 18-21 canonical console/room/public parity, room read-only and registration denial, exact anonymous allowlist, unchanged simple order, private helper denial and no direct promotion writes'
 
 -- CASE 17: every non-waiting status is rejected, even for a previously arranged
 -- person. Closed sessions and missing Auth are rejected at the server boundary.

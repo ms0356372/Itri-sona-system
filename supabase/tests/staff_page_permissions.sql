@@ -100,7 +100,7 @@ create temporary table permission_rpc_cases(page,statement) as values
   ('console',$sql$select public.call_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
   ('console',$sql$select public.promote_waiting_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
   ('console',$sql$select public.cancel_promoted_participant('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
-  ('console',$sql$select public.get_standard_waiting_queue('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
+  ('queue_read',$sql$select public.get_standard_waiting_queue('ffffffff-ffff-ffff-ffff-ffffffffffff')$sql$),
   ('room',$sql$select public.start_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
   ('room',$sql$select public.complete_examination('ffffffff-ffff-ffff-ffff-ffffffffffff','診間 1',array['腹部超音波'],'88888888-8888-8888-8888-888888888888',repeat('a',64))$sql$),
   ('room',$sql$select public.enqueue_additional_examination('ffffffff-ffff-ffff-ffff-ffffffffffff',array['腹部超音波'])$sql$),
@@ -146,7 +146,8 @@ begin
     perform pg_temp.assert_permission(rows_seen=case when any_page then 1 else 0 end,'examinations select case '||staff.case_number);
     for rpc in select * from permission_rpc_cases loop
       perform pg_temp.check_rpc_gate(rpc.statement,case rpc.page
-        when 'registration' then staff.registration when 'console' then staff.console else staff.room end);
+        when 'registration' then staff.registration when 'console' then staff.console
+        when 'queue_read' then staff.console or staff.room else staff.room end);
     end loop;
     perform pg_temp.expect_permission_denied(format('update public.staff_permissions set can_registration=true where user_id=%L',staff.user_id));
     perform pg_temp.expect_permission_denied(format('delete from public.staff_permissions where user_id=%L',staff.user_id));
@@ -189,7 +190,7 @@ begin
   for rpc in select * from permission_rpc_cases loop perform pg_temp.check_rpc_gate(rpc.statement,false); end loop;
   perform pg_temp.assert_permission(not public.is_active_staff() and not public.can_use_registration() and not public.can_use_console() and not public.can_use_room(),'missing auth identity fails closed');
 end $$;
-\echo 'PASS: A-G all eight page combinations, inactive/missing users, eighteen RPC gates and direct API/RLS boundaries'
+\echo 'PASS: A-G all eight page combinations, inactive/missing users, page RPC gates including console/room queue reads and direct API/RLS boundaries'
 
 -- D: registration-only can create, edit/import schedule, check in, manage the
 -- roster and clean a session, without unrestricted status/counter writes.

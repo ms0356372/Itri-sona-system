@@ -39,7 +39,8 @@ vi.mock('../features/auth/useStaffPermissions',()=>({useStaffPermissions:()=>({
 vi.mock('../features/sessions/service',()=>({listSessions:remote.listSessions,createSession:vi.fn(),updateSessionRoomCount:vi.fn()}));
 vi.mock('../features/schedule/service',()=>({listParticipants:remote.listParticipants}));
 vi.mock('../features/room/service',()=>({listRooms:remote.listRooms,getSessionRoomCount:remote.getSessionRoomCount,setRoomAway:vi.fn()}));
-vi.mock('../features/console/service',()=>({callParticipant:remote.callParticipant,updateWaitingStatus:vi.fn(),getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>()),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
+vi.mock('../features/workflow/service',()=>({getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>())}));
+vi.mock('../features/console/service',()=>({callParticipant:remote.callParticipant,updateWaitingStatus:vi.fn(),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
 vi.mock('../features/examination/service',async original=>({
   ...await original<typeof import('../features/examination/service')>(),
   listExaminations:remote.listExaminations,enqueueAdditionalExamination:vi.fn(),

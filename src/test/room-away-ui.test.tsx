@@ -13,8 +13,10 @@ const remote=vi.hoisted(()=>({
   rooms:[] as StoredRoom[],roomCount:undefined as number|undefined,loading:false,error:'',refresh:vi.fn(),acceptRoom:vi.fn(),setAway:vi.fn(),
   roomExamination:vi.fn(),examinations:vi.fn(),examination:vi.fn(),restoreDraft:vi.fn(),saveDraft:vi.fn(),start:vi.fn(),complete:vi.fn(),clock:vi.fn(),
   historyById:vi.fn(),historyByEmployee:vi.fn(),stats:vi.fn(),
+  queueParticipants:[] as Participant[],
   claimSession:null as string|null,claimRoom:null as string|null,claimOwned:true,claimConfirmed:true,claimLoading:false,claimBusy:false,claimError:'',claimWarning:'',otherClaims:[] as string[],claimSelect:vi.fn(),claimRefresh:vi.fn(),claimRelease:vi.fn(),claimRevoke:vi.fn(),claimInputs:vi.fn(),
 }));
+vi.mock('../features/workflow/service',()=>({getStandardWaitingQueue:vi.fn(async(sessionId:string)=>new Map(remote.queueParticipants.filter(person=>person.sessionId===sessionId&&person.status==='等候中').map((person,index)=>[person.id,index+1])))}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:()=>({rooms:remote.rooms,roomCount:remote.roomCount,loading:remote.loading,error:remote.error,refresh:remote.refresh,acceptRoom:remote.acceptRoom})}));
 vi.mock('../features/room/service',async importOriginal=>({...await importOriginal<typeof import('../features/room/service')>(),setRoomAway:remote.setAway}));
 vi.mock('../features/examination/service',()=>({getRoomExamination:remote.roomExamination,listExaminations:remote.examinations,getExamination:remote.examination,restoreDraft:remote.restoreDraft,saveExaminationDraft:remote.saveDraft,startExamination:remote.start,completeExamination:remote.complete,cloudNow:remote.clock}));
@@ -72,6 +74,7 @@ async function input(element:HTMLInputElement,value:string){
   await act(async()=>{setValue.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});
 }
 async function render(participants:Participant[]=[participant()],current:Session|null=session){
+  remote.queueParticipants=participants;
   await act(async()=>{root.render(<UltrasoundRoom current={current} participants={participants} onChanged={changed}/>);});
 }
 async function switchRoom(roomId:string){

@@ -178,7 +178,70 @@ from pg_proc p join pg_namespace n on n.oid=p.pronamespace
 where n.nspname='public' and p.prokind='f';
 SQL
   fi
+  if [[ "$migration" == *202610160002_room_waiting_queue_read.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+create table auth.room_queue_business_snapshot as
+select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+union all select 'participants',to_jsonb(p) from public.participants p
+union all select 'examinations',to_jsonb(e) from public.examinations e
+union all select 'rooms',to_jsonb(r) from public.rooms r
+union all select 'group_counters',to_jsonb(c) from public.group_counters c
+union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+union all select 'public_boards',to_jsonb(b) from public.session_public_boards b
+union all select 'registered_devices',to_jsonb(d) from public.registered_devices d
+union all select 'clearance_requests',to_jsonb(c) from public.clearance_requests c
+union all select 'ultrasound_items',to_jsonb(i) from public.ultrasound_items i;
+create table auth.room_queue_function_snapshot as
+select p.oid,p.proacl,p.proowner,pg_get_functiondef(p.oid) definition
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and p.prokind='f';
+SQL
+  fi
   psql_local < "$migration" > /dev/null
+  if [[ "$migration" == *202610160002_room_waiting_queue_read.sql ]]; then
+    psql_local >/dev/null <<'SQL'
+do $$ declare old_function record; current_function record; expected_definition text; begin
+  if exists (
+    with current_rows as (
+      select 'sessions' kind,to_jsonb(s) record from public.health_sessions s
+      union all select 'participants',to_jsonb(p) from public.participants p
+      union all select 'examinations',to_jsonb(e) from public.examinations e
+      union all select 'rooms',to_jsonb(r) from public.rooms r
+      union all select 'group_counters',to_jsonb(c) from public.group_counters c
+      union all select 'simple_queue_counters',to_jsonb(c) from public.simple_queue_counters c
+      union all select 'staff_permissions',to_jsonb(p) from public.staff_permissions p
+      union all select 'public_boards',to_jsonb(b) from public.session_public_boards b
+      union all select 'registered_devices',to_jsonb(d) from public.registered_devices d
+      union all select 'clearance_requests',to_jsonb(c) from public.clearance_requests c
+      union all select 'ultrasound_items',to_jsonb(i) from public.ultrasound_items i
+    ), changes as (
+      (select * from auth.room_queue_business_snapshot except all select * from current_rows)
+      union all (select * from current_rows except all select * from auth.room_queue_business_snapshot)
+    ) select 1 from changes
+  ) then raise exception 'room queue read migration changed business data, permissions or counters'; end if;
+  for old_function in select * from auth.room_queue_function_snapshot loop
+    select p.proacl,p.proowner,pg_get_functiondef(p.oid) definition into current_function from pg_proc p where p.oid=old_function.oid;
+    expected_definition:=old_function.definition;
+    if old_function.oid='public.get_standard_waiting_queue(uuid)'::regprocedure then
+      expected_definition:=replace(expected_definition,
+        'auth.uid() is null or not public.can_use_console()',
+        'auth.uid() is null or not (public.can_use_console() or public.can_use_room())');
+    end if;
+    if not found or current_function.proacl is distinct from old_function.proacl
+      or current_function.proowner is distinct from old_function.proowner
+      or current_function.definition is distinct from expected_definition then
+      raise exception 'room queue read migration changed an RPC beyond its read gate: %',old_function.oid::regprocedure;
+    end if;
+  end loop;
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.prokind='f')
+    <>(select count(*) from auth.room_queue_function_snapshot) then
+    raise exception 'room queue read migration added or removed a public function';
+  end if;
+end $$;
+SQL
+    echo 'PASS: room queue migration changes only the console/room read gate; every business row, RPC body, owner and ACL is preserved'
+  fi
   if [[ "$migration" == *202610160001_standard_waiting_queue.sql ]]; then
     psql_local >/dev/null <<'SQL'
 do $$ declare old_function record; current_function record; begin
