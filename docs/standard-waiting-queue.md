@@ -32,7 +32,7 @@ Migration：`202610160001_standard_waiting_queue.sql`。既有兩欄為 null，�
 
 ## 診間選人清單
 
-控制台與診間沿用 `workflow/useWaitingQueue`、共用讀取 service 及排序 helper。標準模式只依同一份伺服器最終順位重排等候者所占的位置，其他狀態的位置與全部既有選項保留。簡易模式整份選單依既有數字號碼排序，再以 sequence／ID 保持與公開 RPC 相同的備援順序。不新增公告序號，也不在診間重寫 effective group 或 promotion 演算法。
+控制台與診間沿用 `workflow/useWaitingQueue`、共用讀取 service 及排序 helper。兩種模式都將所有「等候中」人員集中在選單最上方，再接其他狀態人員。標準模式等候者依同一份伺服器最終順位排列；簡易模式等候者依既有數字號碼排序，再以 sequence／ID 保持與公開 RPC 相同的備援順序。其他狀態保留全部既有選項，彼此維持原 participants 相對順序。不新增公告序號，也不在診間重寫 effective group 或 promotion 演算法。
 
 participants 的報到、狀態、提早安排等資料更新會讓共用 hook 重新讀取順位，沿用 coalescer 與場次／版本隔離，不增加 Realtime channel。選單只在需要時讀取；已選人、開始／完成檢查、歷年資料、追加檢查與 claim 的原流程不受排序載入影響。未確認或暫缺部分順位時，保留全部選項、提示重試，僅暫停選取未確認的等候者；其他選項及查詢照常使用。
 

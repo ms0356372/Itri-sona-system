@@ -18,18 +18,16 @@ export function compareWaitingParticipants(left:Participant,right:Participant,or
 }
 
 /** Order an existing selection without changing which participants it contains.
- * Non-waiting positions remain intact in standard mode. Only waiting slots are
- * replaced, so their relative order matches the server/public queue exactly.
+ * All waiting participants form the first block in public/server queue order.
+ * Everyone else follows in their original relative order, in either mode.
  * Undefined means that order is not yet confirmed; never invent a local one.
  */
 export function buildWaitingQueue(session:Pick<Session,'workflowMode'>|null,participants:readonly Participant[],standardWaitingRanks?:ReadonlyMap<string,number>):Participant[]|undefined{
   const simple=isSimpleSession(session);
   const order={simple,standardWaitingRanks};
-  if(simple)return [...participants].sort((left,right)=>compareWaitingParticipants(left,right,order));
   const waiting=participants.filter(person=>person.status==='等候中');
-  if(!waiting.length)return [...participants];
-  if(!standardWaitingRanks||waiting.some(person=>!standardWaitingRanks.has(person.id)))return undefined;
+  const others=participants.filter(person=>person.status!=='等候中');
+  if(!simple&&waiting.length&&(!standardWaitingRanks||waiting.some(person=>!standardWaitingRanks.has(person.id))))return undefined;
   waiting.sort((left,right)=>compareWaitingParticipants(left,right,order));
-  let index=0;
-  return participants.map(person=>person.status==='等候中'?waiting[index++]:person);
+  return [...waiting,...others];
 }
