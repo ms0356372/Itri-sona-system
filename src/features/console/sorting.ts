@@ -55,11 +55,19 @@ function compareQueue(left:Participant,right:Participant,simple:boolean,directio
   return compared?sign*compared:fallback(left,right);
 }
 
-export function sortConsoleRows(rows:Participant[],options:{simple:boolean;mode:ConsoleSortMode;direction:ConsoleSortDirection;assignedRooms:ReadonlyMap<string,string|null|undefined>;roomCount:number}):Participant[]{
-  const {simple,mode,direction,assignedRooms,roomCount}=options;
+export function sortConsoleRows(rows:Participant[],options:{simple:boolean;mode:ConsoleSortMode;direction:ConsoleSortDirection;assignedRooms:ReadonlyMap<string,string|null|undefined>;roomCount:number;standardWaitingRanks?:ReadonlyMap<string,number>}):Participant[]{
+  const {simple,mode,direction,assignedRooms,roomCount,standardWaitingRanks}=options;
   const priority=(left:Participant,right:Participant)=>statusPriority(left.status)-statusPriority(right.status)||compareQueue(left,right,simple,'asc');
   return [...rows].sort((left,right)=>{
-    if(mode==='priority')return priority(left,right);
+    if(mode==='priority'){
+      if(!simple&&standardWaitingRanks&&left.status==='等候中'&&right.status==='等候中'){
+        const leftRank=standardWaitingRanks.get(left.id);const rightRank=standardWaitingRanks.get(right.id);
+        if(leftRank===undefined||rightRank===undefined){
+          if(leftRank!==rightRank)return leftRank===undefined?1:-1;
+        }else if(leftRank!==rightRank)return leftRank-rightRank;
+      }
+      return priority(left,right);
+    }
     if(mode==='queue')return compareQueue(left,right,simple,direction);
     const leftRoom=assignedRooms.get(left.id);const rightRoom=assignedRooms.get(right.id);
     const leftNumber=isRoomEnabled(leftRoom,roomCount)?getRoomNumber(leftRoom):null;

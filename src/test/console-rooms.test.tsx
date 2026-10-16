@@ -11,7 +11,7 @@ import type {Examination,Participant,RoomState,Session} from '../types';
 type CloudPayload={eventType:string;new:Record<string,unknown>;old:Record<string,unknown>};
 const realtime=vi.hoisted(()=>({handlers:[] as Array<(payload:CloudPayload)=>void>}));
 vi.mock('../lib/supabase',()=>({requireSupabase:()=>({channel:()=>{const channel={on:(_event:string,_filter:unknown,handler:(payload:CloudPayload)=>void)=>{realtime.handlers.push(handler);return channel;},subscribe:()=>channel};return channel;},removeChannel:vi.fn()})}));
-vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn()}));
+vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>()),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
 vi.mock('../features/examination/service',async importOriginal=>({...await importOriginal<typeof import('../features/examination/service')>(),listExaminations:vi.fn(),enqueueAdditionalExamination:vi.fn()}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:vi.fn()}));
 
