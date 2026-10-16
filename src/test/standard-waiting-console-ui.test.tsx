@@ -2,10 +2,12 @@ import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {UltrasoundConsole} from '../features/console/Console';
-import {callParticipant,cancelPromotedParticipant,getStandardWaitingQueue,promoteWaitingParticipant} from '../features/console/service';
+import {callParticipant,cancelPromotedParticipant,promoteWaitingParticipant} from '../features/console/service';
+import {getStandardWaitingQueue} from '../features/workflow/service';
 import type {Participant,Session} from '../types';
 
-vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),getStandardWaitingQueue:vi.fn(),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
+vi.mock('../features/workflow/service',()=>({getStandardWaitingQueue:vi.fn()}));
+vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
 vi.mock('../features/examination/service',async original=>({...await original<typeof import('../features/examination/service')>(),listExaminations:vi.fn(async()=>[])}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:()=>({rooms:[],loading:false,error:'',refresh:vi.fn(async()=>{})})}));
 vi.mock('../features/sync/realtime',()=>({subscribeExaminations:()=>()=>{}}));

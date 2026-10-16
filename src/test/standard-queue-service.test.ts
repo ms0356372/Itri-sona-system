@@ -1,9 +1,10 @@
+import {getStandardWaitingQueue} from '../features/workflow/service';
 import {beforeEach,describe,expect,it,vi} from 'vitest';
 
 const remote=vi.hoisted(()=>({rpc:vi.fn()}));
 vi.mock('../lib/supabase',()=>({requireSupabase:()=>({rpc:remote.rpc})}));
 
-import {cancelPromotedParticipant,getStandardWaitingQueue,promoteWaitingParticipant} from '../features/console/service';
+import {cancelPromotedParticipant,promoteWaitingParticipant} from '../features/console/service';
 
 const first={participant_id:'participant-1',queue_position:1};
 const second={participant_id:'participant-2',queue_position:2};

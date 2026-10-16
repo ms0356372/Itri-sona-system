@@ -14,7 +14,8 @@ vi.mock('../lib/supabase',()=>({requireSupabase:()=>({
   channel:()=>{const channel={on:(_event:string,_filter:unknown,handler:(payload:CloudPayload)=>void)=>{realtime.handlers.push(handler);return channel;},subscribe:()=>channel};return channel;},
   removeChannel:vi.fn(),rpc:realtime.rpc,
 })}));
-vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>()),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
+vi.mock('../features/workflow/service',()=>({getStandardWaitingQueue:vi.fn(async()=>new Map<string,number>())}));
+vi.mock('../features/console/service',()=>({callParticipant:vi.fn(),updateWaitingStatus:vi.fn(),promoteWaitingParticipant:vi.fn(),cancelPromotedParticipant:vi.fn()}));
 vi.mock('../features/examination/service',async importOriginal=>({...await importOriginal<typeof import('../features/examination/service')>(),listExaminations:vi.fn(),enqueueAdditionalExamination:vi.fn()}));
 vi.mock('../features/room/useRoomStates',()=>({useRoomStates:vi.fn()}));
 

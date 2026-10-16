@@ -20,7 +20,7 @@ Base Queue 只包含「等候中」，依 effective group、實際報到時間�
 
 控制台 `get_standard_waiting_queue` 與 token 保護的公開 RPC 共用私有 `build_standard_waiting_queue`。公開回應仍只有公司／日期，以及每人的工號、遮罩姓名；瀏覽器用排序後 `index + 1` 顯示順位與前三 badge。
 
-新 RPC 檢查登入、控制台權限、場次存取、標準模式、有效場次及等候狀態。安排／取消以場次 `FOR NO KEY UPDATE` 序列化，再鎖定目標人員；此鎖和既有報到 FK 的 `KEY SHARE` 相容，不修改報到／叫號 RPC。新欄位無瀏覽器 INSERT／UPDATE grant，私有 helpers 也不授予 `anon` 或 `authenticated` 執行權。
+提早安排／取消 RPC 檢查登入、控制台權限、場次存取、標準模式、有效場次及等候狀態。順位讀取 RPC 則允許控制台或診間帳號，登記專用與匿名帳號仍無權呼叫。安排／取消以場次 `FOR NO KEY UPDATE` 序列化，再鎖定目標人員；此鎖和既有報到 FK 的 `KEY SHARE` 相容，不修改報到／叫號 RPC。新欄位無瀏覽器 INSERT／UPDATE grant，私有 helpers 也不授予 `anon` 或 `authenticated` 執行權。
 
 控制台只在「現場優先」使用伺服器順位，保留號碼與診間手動排序。沿用 participants Realtime 更新及 refresh coalescer，不新增訂閱。場次切換及過期回應有隔離；讀取失敗會顯示錯誤與重試；尚未確認順位時，「現場優先」暫不呈現等候列，避免把舊報到號碼誤當正式候檢順序。手動號碼／診間排序仍可使用。
 
@@ -29,3 +29,11 @@ Base Queue 只包含「等候中」，依 effective group、實際報到時間�
 Migration：`202610160001_standard_waiting_queue.sql`。既有兩欄為 null，不改報到時間、號碼、counter、檢查或歷史紀錄。沿用 GitHub → Supabase migration 流程，先部署 migration 再啟用新前端，不需手動回填。既有 `participants_public_waiting_idx` 可限制每場等候者查詢；未增加未經量測的索引。
 
 前端測試涵蓋時段、設備時間偏差、微秒、mapping、RPC payload、控制台操作、場次隔離及排序回歸。`scripts/test-room-away-db.sh` 在無網路的拋棄式 PostgreSQL 17 執行實際 migrations、資料保留檢查、SQL 行為／權限／公開最小回應及並行測試，不使用正式 Supabase credentials。
+
+## 診間選人清單
+
+控制台與診間沿用 `workflow/useWaitingQueue`、共用讀取 service 及排序 helper。標準模式只依同一份伺服器最終順位重排等候者所占的位置，其他狀態的位置與全部既有選項保留。簡易模式整份選單依既有數字號碼排序，再以 sequence／ID 保持與公開 RPC 相同的備援順序。不新增公告序號，也不在診間重寫 effective group 或 promotion 演算法。
+
+participants 的報到、狀態、提早安排等資料更新會讓共用 hook 重新讀取順位，沿用 coalescer 與場次／版本隔離，不增加 Realtime channel。選單只在需要時讀取；已選人、開始／完成檢查、歷年資料、追加檢查與 claim 的原流程不受排序載入影響。未確認或暫缺部分順位時，保留全部選項、提示重試，僅暫停選取未確認的等候者；其他選項及查詢照常使用。
+
+`202610160002_room_waiting_queue_read.sql` 只擴充既有順位讀取 RPC 的頁面權限，讓 room-only 帳號能讀同一份 canonical queue。沒有新增資料欄位，沒有擴大匿名資料或提早安排／取消權限。部署此 migration 後再更新前端，無需資料回填。

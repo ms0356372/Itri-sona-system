@@ -1,6 +1,7 @@
 import type {Examination,Participant,WorkStatus} from '../../types';
 import {getRoomNumber,isRoomEnabled} from '../room/status';
 import {compareQueueNumbers,getQueueNumber} from '../workflow/mode';
+import {compareWaitingParticipants} from '../workflow/waitingQueue';
 
 export type ConsoleSortMode='priority'|'queue'|'room';
 export type ConsoleSortDirection='asc'|'desc';
@@ -60,11 +61,9 @@ export function sortConsoleRows(rows:Participant[],options:{simple:boolean;mode:
   const priority=(left:Participant,right:Participant)=>statusPriority(left.status)-statusPriority(right.status)||compareQueue(left,right,simple,'asc');
   return [...rows].sort((left,right)=>{
     if(mode==='priority'){
-      if(!simple&&standardWaitingRanks&&left.status==='等候中'&&right.status==='等候中'){
-        const leftRank=standardWaitingRanks.get(left.id);const rightRank=standardWaitingRanks.get(right.id);
-        if(leftRank===undefined||rightRank===undefined){
-          if(leftRank!==rightRank)return leftRank===undefined?1:-1;
-        }else if(leftRank!==rightRank)return leftRank-rightRank;
+      if((simple||standardWaitingRanks)&&left.status==='等候中'&&right.status==='等候中'){
+        const compared=compareWaitingParticipants(left,right,{simple,standardWaitingRanks});
+        if(compared)return compared;
       }
       return priority(left,right);
     }
