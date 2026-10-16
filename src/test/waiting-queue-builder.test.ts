@@ -25,6 +25,18 @@ function serverSnapshot(ordered:readonly Participant[]){
 }
 
 describe('共用候檢 builder：標準模式沿用公開看板的伺服器最終順位',()=>{
+  it('等候者依 server rank 完整集中在最前方，未報到及已叫號者依原相對順序接在後方',()=>{
+    const b1=person('B1');const x=person('X',{status:'未報到'});
+    const a1=person('A1');const y=person('Y',{status:'已叫號'});const a2=person('A2');
+    const snapshot=serverSnapshot([a1,a2,b1]);
+    const result=buildWaitingQueue(standard,[b1,x,a1,y,a2],snapshot.ranks);
+    expect(ids(result)).toEqual(['A1','A2','B1','X','Y']);
+    expect(result?.slice(0,3).every(row=>row.status==='等候中')).toBe(true);
+    expect(result?.slice(3).every(row=>row.status!=='等候中')).toBe(true);
+    expect(waitingEmployees(result)).toEqual(snapshot.publicPeople.map(row=>row.employeeNo));
+    expect(result?.[3]).toBe(x);expect(result?.[4]).toBe(y);
+  });
+
   it('A、B、C、G promoted、D 的公開順位不受原始陣列、姓名、工號或 Excel sequence 影響',()=>{
     const a=person('A',{sequence:100,name:'林',employeeNo:'999'});
     const b=person('B',{sequence:90,name:'陳',employeeNo:'888'});
@@ -55,14 +67,16 @@ describe('共用候檢 builder：標準模式沿用公開看板的伺服器最�
     const next=[d,g,calledA,c,b];
     const snapshot=serverSnapshot([b,c,g,d]);
     const result=buildWaitingQueue(standard,next,snapshot.ranks);
-    expect(ids(result)).toEqual(['B','C','A','G','D']);
-    expect(result?.[2]).toBe(calledA);
+    expect(ids(result)).toEqual(['B','C','G','D','A']);
+    expect(result?.[4]).toBe(calledA);
     expect(waitingEmployees(result)).toEqual(snapshot.publicPeople.map(row=>row.employeeNo));
   });
 
   it('回到等候中後重新採用完整 queue，不沿用前一次診間位置',()=>{
     const a=person('A');const b=person('B');const c=person('C');
     const g=person('G',{groupCode:'G',promotedAt:'2026-10-16T00:20:00Z'});const d=person('D');
+    const calledA={...a,status:'已叫號' as const};
+    expect(ids(buildWaitingQueue(standard,[b,c,calledA,g,d],ranks(['B','C','G','D'])))).toEqual(['B','C','G','D','A']);
     const snapshot=serverSnapshot([a,b,c,g,d]);
     const result=buildWaitingQueue(standard,[b,c,a,g,d],snapshot.ranks);
     expect(ids(result)).toEqual(['A','B','C','G','D']);
@@ -72,12 +86,24 @@ describe('共用候檢 builder：標準模式沿用公開看板的伺服器最�
   it('取消提早安排時，立即依新的 Base Queue rank 恢復與公開看板相同順序',()=>{
     const a=person('A');const b=person('B');const c=person('C');const d=person('D');
     const g=person('G',{groupCode:'G',promotedAt:'2026-10-16T00:20:00Z'});
-    const rows=[g,d,c,b,a];
-    expect(ids(buildWaitingQueue(standard,rows,ranks(['A','B','C','G','D'])))).toEqual(['A','B','C','G','D']);
+    const unreported=person('unreported',{status:'未報到'});const called=person('called',{status:'已叫號'});
+    const rows=[unreported,g,d,called,c,b,a];
+    expect(ids(buildWaitingQueue(standard,rows,ranks(['A','B','C','G','D'])))).toEqual(['A','B','C','G','D','unreported','called']);
     const cancelled={...g,promotedAt:null};
     const snapshot=serverSnapshot([a,b,c,d,cancelled]);
-    const result=buildWaitingQueue(standard,[cancelled,d,c,b,a],snapshot.ranks);
-    expect(ids(result)).toEqual(['A','B','C','D','G']);
+    const result=buildWaitingQueue(standard,[unreported,cancelled,d,called,c,b,a],snapshot.ranks);
+    expect(ids(result)).toEqual(['A','B','C','D','G','unreported','called']);
+    expect(waitingEmployees(result)).toEqual(snapshot.publicPeople.map(row=>row.employeeNo));
+  });
+
+  it('新人由未報到變成等候中後插入正式 queue，而非保留原本 Excel 位置',()=>{
+    const newcomer=person('new',{status:'未報到',sequence:1});const third=person('third');
+    const first=person('first');const called=person('called',{status:'已叫號'});
+    expect(ids(buildWaitingQueue(standard,[newcomer,third,called,first],ranks(['first','third'])))).toEqual(['first','third','new','called']);
+    const arrived={...newcomer,status:'等候中' as const};
+    const snapshot=serverSnapshot([first,arrived,third]);
+    const result=buildWaitingQueue(standard,[arrived,third,called,first],snapshot.ranks);
+    expect(ids(result)).toEqual(['first','new','third','called']);
     expect(waitingEmployees(result)).toEqual(snapshot.publicPeople.map(row=>row.employeeNo));
   });
 
@@ -88,22 +114,32 @@ describe('共用候檢 builder：標準模式沿用公開看板的伺服器最�
   });
 
   const otherStatuses:WorkStatus[]=['未報到','已叫號','上廁所','心電圖','先做其他','檢查中','已完成'];
-  it.each(otherStatuses)('不變更 %s 的可見性、位置或物件，只替換等候中的位置',status=>{
+  it.each(otherStatuses)('保留 %s 的可見性及物件，移至全部等候者之後',status=>{
     const other=person('other',{status});const first=person('first');const second=person('second');
     const result=buildWaitingQueue(standard,[second,other,first],ranks(['first','second']));
-    expect(ids(result)).toEqual(['first','other','second']);
-    expect(result?.[1]).toBe(other);
+    expect(ids(result)).toEqual(['first','second','other']);
+    expect(result?.[2]).toBe(other);
     expect(result).toHaveLength(3);
   });
 
-  it('所有七種其他狀態混合時都留在原位，不因缺少 SQL waiting rank 被隱藏',()=>{
+  it('所有七種其他狀態混合時完整保留原相對順序，且全部在連續 waiting 區之後',()=>{
     const first=person('first');const second=person('second');
     const other=otherStatuses.map(status=>person(status,{status}));
-    const rows=[second,...other,first];
+    const rows=[other[0],second,other[1],first,...other.slice(2)];
     const result=buildWaitingQueue(standard,rows,ranks(['first','second']));
-    expect(ids(result)).toEqual(['first',...otherStatuses,'second']);
-    expect(result?.slice(1,-1)).toEqual(other);
-    expect(result?.slice(1,-1).every((row,index)=>row===other[index])).toBe(true);
+    expect(ids(result)).toEqual(['first','second',...otherStatuses]);
+    expect(result).toHaveLength(rows.length);
+    expect(result?.slice(2)).toEqual(other);
+    expect(result?.slice(2).every((row,index)=>row===other[index])).toBe(true);
+  });
+
+  it.each(otherStatuses)('等候者變成 %s 時立即離開上方 waiting 區，依原相對順序進入其他人員區',status=>{
+    const first=person('first');const second=person('second');const called=person('called',{status:'已叫號'});
+    expect(ids(buildWaitingQueue(standard,[second,called,first],ranks(['first','second'])))).toEqual(['first','second','called']);
+    const changed={...first,status};
+    const result=buildWaitingQueue(standard,[second,called,changed],ranks(['second']));
+    expect(ids(result)).toEqual(['second','called','first']);
+    expect(result?.[2]).toBe(changed);
   });
 
   it('沒有取得 server rank 時不以本機時間、checkinNo 或原陣列冒充正式順位',()=>{
@@ -138,12 +174,28 @@ describe('共用候檢 builder：標準模式沿用公開看板的伺服器最�
     const originalRanks=[...serverRanks];
     const result=buildWaitingQueue(standard,rows,serverRanks);
     expect(result).not.toBe(rows);expect(ids(rows)).toEqual(['B','called','A']);
-    expect(result?.[0]).toBe(a);expect(result?.[1]).toBe(called);expect(result?.[2]).toBe(b);
+    expect(result?.[0]).toBe(a);expect(result?.[1]).toBe(b);expect(result?.[2]).toBe(called);
     expect([...serverRanks]).toEqual(originalRanks);
   });
 });
 
 describe('共用候檢 builder：簡易模式與公開看板一樣以數字 queueNumber 排序',()=>{
+  it('1、2、3、10 的 waiting 全部在最前，其他狀態即使號碼較小仍排後且不改原相對順序',()=>{
+    const one=person('1',{queueNumber:1});const two=person('2',{queueNumber:2});
+    const three=person('3',{queueNumber:3});const ten=person('10',{queueNumber:10});
+    const called=person('called',{status:'已叫號',queueNumber:1});
+    const unreported=person('unreported',{status:'未報到',queueNumber:null,checkinNo:null});
+    const done=person('done',{status:'已完成',queueNumber:2});
+    const snapshot=serverSnapshot([one,two,three,ten]);
+    const rows=[called,ten,unreported,three,done,two,one];
+    const result=buildWaitingQueue(simple,rows);
+    expect(ids(result)).toEqual(['1','2','3','10','called','unreported','done']);
+    expect(waitingEmployees(result)).toEqual(snapshot.publicPeople.map(row=>row.employeeNo));
+    expect(result?.slice(0,4).every(row=>row.status==='等候中')).toBe(true);
+    expect(result?.slice(4)).toEqual([called,unreported,done]);
+    expect(result).toHaveLength(rows.length);
+  });
+
   it('1、2、3、10 依數值排列，且不使用 standard rank、姓名或 sequence 作主要排序',()=>{
     const rows=[10,3,2,1].map((number,index)=>person(String(number),{queueNumber:number,sequence:index,name:`name-${index}`}));
     const result=buildWaitingQueue(simple,rows,ranks(['10','3','2','1']));
@@ -184,10 +236,18 @@ describe('共用候檢 builder：簡易模式與公開看板一樣以數字 queu
     expect(ids(buildWaitingQueue(simple,rows))).toEqual(['valid-a','valid-b','valid-z','null-a','null-b','null-z']);
   });
 
-  it('所有既有狀態仍保留，builder 不代替診間執行篩選',()=>{
+  it('所有既有狀態仍保留，其他七種狀態保持原相對順序排在 waiting 後',()=>{
     const statuses:WorkStatus[]=['等候中','未報到','已叫號','上廁所','心電圖','先做其他','檢查中','已完成'];
     const rows=statuses.map((status,index)=>person(status,{status,queueNumber:index+1})).reverse();
-    expect(ids(buildWaitingQueue(simple,rows))).toEqual(statuses);
+    expect(ids(buildWaitingQueue(simple,rows))).toEqual(['等候中',...statuses.slice(1).reverse()]);
+  });
+
+  it('沒有 waiting 時不依 queueNumber 重排其他人員，回傳原內容的新陣列',()=>{
+    const rows=[person('done',{status:'已完成',queueNumber:10}),person('called',{status:'已叫號',queueNumber:1}),person('unreported',{status:'未報到',queueNumber:null})];
+    const result=buildWaitingQueue(simple,rows);
+    expect(ids(result)).toEqual(['done','called','unreported']);
+    expect(result).not.toBe(rows);expect(result).toEqual(rows);
+    expect(result?.every((row,index)=>row===rows[index])).toBe(true);
   });
 
   it('排序不改動陣列、Participant 或 promoted_at，也不需要 server rank map',()=>{

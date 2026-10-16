@@ -53,6 +53,14 @@ describe('診間選擇今日受檢者共用正式候檢順位',()=>{
     expect(remote.queue).toHaveBeenCalledExactlyOnceWith(session.id);expect(selector().disabled).toBe(false);
   });
 
+  it('standard將所有等候者依server順位集中上方，未報到與已叫號均移到後面',async()=>{
+    const rows=[person('B1',{checkinNo:'B1'}),person('X',{status:'未報到',checkinNo:null,checkedInAt:null}),person('A1'),person('Y',{status:'已叫號'}),person('A2',{checkinNo:'A2'})];
+    remote.queue.mockResolvedValue(ranks(['A1','A2','B1']));await showList(rows);
+    expect(ids()).toEqual(['A1','A2','B1','X','Y']);
+    expect(ids().slice(0,3)).toEqual(waitingIds(rows));
+    expect(options().every(option=>!option.disabled)).toBe(true);
+  });
+
   it('不採姓名、工號、Excel sequence或原array作為standard主要排序',async()=>{
     const rows=baseRows().map((row,index)=>({...row,name:String(10-index),employeeNo:String(index),sequence:index}));
     await showList(rows);expect(ids()).toEqual(['A','B','C','G','D']);
@@ -73,24 +81,28 @@ describe('診間選擇今日受檢者共用正式候檢順位',()=>{
 
   it.each(['已叫號','檢查中','上廁所','心電圖','先做其他','已完成'] as const)('前三A轉成%s後保留既有選項，等候者自然遞補B C G D',async status=>{
     await showList();const rows=baseRows().map(row=>row.id==='A'?{...row,status}:row);remote.queue.mockResolvedValue(ranks(['B','C','G','D']));await render(rows);await settle();
-    expect(waitingIds(rows)).toEqual(['B','C','G','D']);expect(ids()).toContain('A');expect(options().find(option=>option.value==='A')?.disabled).toBe(false);
+    expect(ids()).toEqual(['B','C','G','D','A']);expect(waitingIds(rows)).toEqual(['B','C','G','D']);expect(options().find(option=>option.value==='A')?.disabled).toBe(false);
   });
 
   it('離開後返回等候者依server重新加入Base Queue，與promoted相對順位一致',async()=>{
-    let rows=baseRows().map(row=>row.id==='A'?{...row,status:'已叫號' as WorkStatus}:row);remote.queue.mockResolvedValue(ranks(['B','C','G','D']));await showList(rows);expect(waitingIds(rows)).toEqual(['B','C','G','D']);
-    rows=rows.map(row=>({...row,status:'等候中'}));remote.queue.mockResolvedValue(ranks(['A','B','C','G','D']));await render(rows);await settle();expect(waitingIds(rows)).toEqual(['A','B','C','G','D']);
+    let rows=baseRows().map(row=>row.id==='A'?{...row,status:'已叫號' as WorkStatus}:row);remote.queue.mockResolvedValue(ranks(['B','C','G','D']));await showList(rows);expect(ids()).toEqual(['B','C','G','D','A']);
+    rows=rows.map(row=>({...row,status:'等候中'}));remote.queue.mockResolvedValue(ranks(['A','B','C','G','D']));await render(rows);await settle();expect(ids()).toEqual(['A','B','C','G','D']);
   });
 
-  it('所有非waiting狀態均保留原位置與選項，只重排waiting slots',async()=>{
+  it('所有waiting在前綴連續排列，其他七種狀態全保留且維持原相對順序',async()=>{
     const statuses:WorkStatus[]=['未報到','已叫號','檢查中','上廁所','心電圖','先做其他','已完成'];
     const others=statuses.map((status,index)=>person(`other-${index}`,{status,checkedInAt:status==='未報到'?null:'2026-10-15T23:30:00Z'}));
     const rows=[baseRows()[0],others[0],baseRows()[1],others[1],baseRows()[2],others[2],baseRows()[3],others[3],baseRows()[4],...others.slice(4)];
-    await showList(rows);expect(ids()).toEqual(['A','other-0','B','other-1','C','other-2','G','other-3','D','other-4','other-5','other-6']);
+    await showList(rows);expect(ids()).toEqual(['A','B','C','G','D','other-0','other-1','other-2','other-3','other-4','other-5','other-6']);
+    expect(ids().slice(0,5)).toEqual(waitingIds(rows));expect(ids().slice(5)).toEqual(others.map(row=>row.id));
     expect(options()).toHaveLength(rows.length);for(const row of others)expect(options().find(option=>option.value===row.id)?.disabled).toBe(false);
   });
 
-  it('standard新人報到後載入新順位，原名單及非waiting不被過濾',async()=>{
-    await showList();const rows=[person('new',{checkedInAt:'2026-10-15T23:31:00Z',checkinNo:'A4'}),...baseRows()];remote.queue.mockResolvedValue(ranks(['A','B','C','G','new','D']));await render(rows);await settle();expect(ids()).toEqual(['A','B','C','G','new','D']);expect(remote.queue).toHaveBeenCalledTimes(2);
+  it('standard Excel中間的未報到者完成報到後插入正式queue，不留在原位置',async()=>{
+    const called=person('called',{status:'已叫號'});const unreported=person('new',{status:'未報到',checkedInAt:null,checkinNo:null});
+    let rows=[baseRows()[0],unreported,called,...baseRows().slice(1)];await showList(rows);expect(ids()).toEqual(['A','B','C','G','D','new','called']);
+    rows=rows.map(row=>row.id==='new'?{...row,status:'等候中',checkedInAt:'2026-10-15T23:31:00Z',checkinNo:'A4'}:row);remote.queue.mockResolvedValue(ranks(['A','B','C','G','new','D']));await render(rows);await settle();
+    expect(ids()).toEqual(['A','B','C','G','new','D','called']);expect(remote.queue).toHaveBeenCalledTimes(2);
   });
 
   it('simple依1 2 3 10數字排序，新增報到後即時計算且不讀standard RPC',async()=>{
@@ -98,6 +110,15 @@ describe('診間選擇今日受檢者共用正式候檢順位',()=>{
     const rows=[10,3,1,2].map(value=>person(String(value),{queueNumber:value,checkinNo:String(value),groupCode:null,slot:null,sequence:20-value}));
     await showList(rows,simple);expect(ids()).toEqual(['1','2','3','10']);
     await render([person('4',{queueNumber:4,checkinNo:'4',groupCode:null,slot:null}),...rows].reverse(),simple);expect(ids()).toEqual(['1','2','3','4','10']);expect(remote.queue).not.toHaveBeenCalled();expect(container.textContent).not.toContain('候檢順位');
+  });
+
+  it('simple所有waiting數字排序集中上方，其他狀態仍依原participants順序',async()=>{
+    const simple={...session,workflowMode:'simple' as const};
+    const ticket=(value:number,status:WorkStatus='等候中')=>person(String(value),{queueNumber:value,checkinNo:String(value),groupCode:null,slot:null,status,sequence:20-value});
+    const rows=[ticket(10),ticket(8,'已叫號'),person('unreported',{status:'未報到',queueNumber:null,checkinNo:null,checkedInAt:null}),ticket(2),ticket(6,'檢查中'),ticket(1),ticket(3)];
+    await showList(rows,simple);expect(ids()).toEqual(['1','2','3','10','8','unreported','6']);expect(ids().slice(0,4)).toEqual(waitingIds(rows));
+    const updated:Participant[]=rows.map(row=>row.id==='unreported'?{...row,status:'等候中',queueNumber:4,checkinNo:'4',checkedInAt:'2026-10-16T00:01:00Z'}:row);
+    await render(updated,simple);expect(ids()).toEqual(['1','2','3','unreported','10','8','6']);expect(remote.queue).not.toHaveBeenCalled();
   });
 
   it('尚未載入順位仍保留全部選項，只停用waiting並guard程式觸發選擇',async()=>{
@@ -138,6 +159,22 @@ describe('診間選擇今日受檢者共用正式候檢順位',()=>{
     await showList();await select('A');await click('腹部超音波');expect(container.querySelector('.room-history')?.textContent).toContain('本機歷年腹部結果');
     const previousReads=remote.queue.mock.calls.length;await render(baseRows().map(row=>row.id==='G'?{...row,promotedAt:null}:row));await settle();
     expect(container.querySelector('.room-patient-name')?.textContent).toBe('完整姓名A');expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('true');expect(button('開始檢查').disabled).toBe(false);expect(container.querySelector('.room-history')?.textContent).toContain('本機歷年腹部結果');expect(remote.queue).toHaveBeenCalledTimes(previousReads);
+  });
+
+  it('候檢狀態與提早安排更新不清除目前檢查、選人、項目或歷年資料',async()=>{
+    await showList();await select('A');await click('腹部超音波');await click('開始檢查');
+    expect(remote.start).toHaveBeenCalledExactlyOnceWith('A','診間 1',['腹部超音波']);
+    const historyReads=remote.history.mock.calls.length;const examinationReads=remote.examination.mock.calls.length;
+    remote.queue.mockResolvedValue(ranks(['B','C','D','G']));
+    const rows=baseRows().map(row=>row.id==='G'?{...row,promotedAt:null}:row.id==='D'?{...row,status:'已叫號' as WorkStatus}:row);
+    await render(rows);await settle();
+    expect(container.querySelector('.room-patient-name')?.textContent).toBe('完整姓名A');
+    expect(container.querySelector('.room-patient-details')?.textContent).toContain('檢查中・診間 1');
+    expect(container.querySelector('.room-history')?.textContent).toContain('本機歷年腹部結果');
+    expect(button('腹部超音波').getAttribute('aria-pressed')).toBe('true');expect(button('腹部超音波').disabled).toBe(true);
+    expect(remote.history).toHaveBeenCalledTimes(historyReads);expect(remote.examination).toHaveBeenCalledTimes(examinationReads);
+    await click('完成檢查');await click('確認完成並同步雲端');
+    expect(remote.complete).toHaveBeenCalledExactlyOnceWith('exam-1','A','診間 1',['腹部超音波']);expect(container.textContent).toContain('檢查已完成');
   });
 
   it('相同場次切換列表前後不沿用過期順位',async()=>{
